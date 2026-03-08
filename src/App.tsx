@@ -162,18 +162,16 @@ export default function App() {
       setMaxVideoDuration(parseInt(maxDuration, 10));
     }
 
-    fetch('/api/licenses/status')
-      .then(res => res.json())
-      .then(data => setIsLicenseSystemEnabled(data.enabled))
-      .catch(err => console.error(err));
-
     fetch('/api/admin/license-notification')
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        return res.json();
+      })
       .then(data => {
         setLicenseNotification(data.message);
         setIsLicenseNotificationEnabled(data.enabled);
       })
-      .catch(err => console.error(err));
+      .catch(err => console.error("Failed to fetch license notification:", err));
   }, []);
 
   const getRemainingDays = () => {
@@ -580,7 +578,10 @@ export default function App() {
       }
     };
 
-    loadSavedData();
+    loadSavedData().catch(err => {
+      console.error("Critical error in loadSavedData:", err);
+      setIsLoaded(true); // Ensure app is not stuck in loading state
+    });
   }, []);
 
   // Save Text and Settings to localStorage

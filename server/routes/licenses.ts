@@ -25,7 +25,9 @@ router.get('/status', (req, res) => {
 // Public: Get available packages
 router.get('/packages', (req, res) => {
   try {
+    console.log('Fetching available packages...');
     const packages = db.prepare('SELECT * FROM packages WHERE active = 1 ORDER BY price ASC').all();
+    console.log(`Found ${packages.length} active packages.`);
     res.json(packages);
   } catch (error: any) {
     console.error('Error fetching packages:', error);

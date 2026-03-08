@@ -7,56 +7,52 @@ interface LicenseGuardProps {
 }
 
 const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
-  const [isLicenseValid, setIsLicenseValid] = useState(true); 
-  // Default to TRUE (secure by default). Only set to false if server explicitly says so.
-  const [isLicenseSystemEnabled, setIsLicenseSystemEnabled] = useState(true);
+  const [isLicenseValid, setIsLicenseValid] = useState(false); 
+  const [isLicenseSystemEnabled, setIsLicenseSystemEnabled] = useState<boolean | null>(null);
   const [checkingLicense, setCheckingLicense] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Debug: Reset license if URL parameter is present
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('reset_license') === 'true') {
+      console.log("Resetting license via URL parameter...");
+      localStorage.removeItem('license_key');
+      localStorage.removeItem('license_expiry');
+      localStorage.removeItem('max_video_duration');
+      localStorage.removeItem('device_id');
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     console.log("LicenseGuard mounted - checking license...");
     
     const checkLicense = async (isBackgroundCheck = false) => {
       try {
+        setError(null);
         // 1. Check if system is enabled
         const statusRes = await fetch(`/api/licenses/status?t=${Date.now()}`);
-        const statusText = await statusRes.text();
-        
-        let statusData;
-        try {
-            statusData = JSON.parse(statusText);
-        } catch (e) {
-            console.error("Failed to parse status response:", statusText);
-            // Don't throw here on background check, just return
-            if (isBackgroundCheck) return;
-            throw new Error(`Invalid JSON from /status: ${statusText.substring(0, 100)}...`);
+        if (!statusRes.ok) {
+          throw new Error(`Status check failed: ${statusRes.status}`);
         }
         
-        // console.log("License system status:", statusData);
-
-        if (!statusData.enabled) {
-          setIsLicenseSystemEnabled(false);
+        const statusData = await statusRes.json();
+        const systemEnabled = statusData.enabled !== false;
+        setIsLicenseSystemEnabled(systemEnabled);
+        
+        if (!systemEnabled) {
           setIsLicenseValid(true);
-          
-          // We DO NOT clear the license key or device ID here anymore.
-          // This ensures that if the system is re-enabled later, users who already 
-          // had a key will stay logged in, while new users (who have no key) will be prompted.
-          
-          // We only clear the expiry/duration info to avoid UI confusion while disabled
           localStorage.removeItem('license_expiry');
           localStorage.removeItem('max_video_duration');
-          
           if (!isBackgroundCheck) setCheckingLicense(false);
           return;
         }
-
-        setIsLicenseSystemEnabled(true);
 
         // 2. Check local license
         const key = localStorage.getItem('license_key');
         const deviceId = localStorage.getItem('device_id');
 
         if (!key || !deviceId) {
-          console.log("No local license found");
+          console.log("No local license found - showing activation screen");
           setIsLicenseValid(false);
           if (!isBackgroundCheck) setCheckingLicense(false);
           return;
@@ -69,21 +65,15 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
           body: JSON.stringify({ key, deviceId, activate: false })
         });
 
-        const verifyText = await verifyRes.text();
-        let verifyData;
-        try {
-            verifyData = JSON.parse(verifyText);
-        } catch (e) {
-            console.error("Failed to parse verify response:", verifyText);
-            if (isBackgroundCheck) return;
-            throw new Error(`Invalid JSON from /verify: ${verifyText.substring(0, 100)}...`);
+        if (!verifyRes.ok && verifyRes.status !== 404 && verifyRes.status !== 403) {
+           throw new Error(`Verification request failed: ${verifyRes.status}`);
         }
 
-        // console.log("License verification result:", verifyData);
+        const verifyData = await verifyRes.json();
 
         if (verifyData.success) {
+          console.log("License verified successfully");
           setIsLicenseValid(true);
-          // Update expiry if needed
           if (verifyData.expiresAt) {
             localStorage.setItem('license_expiry', verifyData.expiresAt);
           }
@@ -94,9 +84,6 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
           console.warn("License check failed:", verifyData.error);
           setIsLicenseValid(false);
           
-          // Only clear ALL license related data if the license is explicitly NOT FOUND (deleted)
-          // For suspended or expired licenses, we keep the data so the periodic check can 
-          // auto-recover if the admin reactivates it.
           if (verifyRes.status === 404) {
             localStorage.removeItem('license_key');
             localStorage.removeItem('license_expiry');
@@ -104,9 +91,10 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
             localStorage.removeItem('device_id');
           }
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error("License check failed", e);
-        // On network error during background check, do nothing (assume valid to prevent flicker)
+        setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${e.message}`);
+        // On network error during background check, keep current state
         if (!isBackgroundCheck) {
              setIsLicenseValid(false); 
         }
@@ -116,16 +104,16 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
     };
 
     // Initial check
-    checkLicense();
+    checkLicense().catch(err => console.error("Initial license check failed:", err));
 
     // Periodic check (every 10 seconds)
     const intervalId = setInterval(() => {
-        checkLicense(true);
+        checkLicense(true).catch(err => console.error("Background license check failed:", err));
     }, 10000);
 
     // Check on window focus
     const handleFocus = () => {
-        checkLicense(true);
+        checkLicense(true).catch(err => console.error("Focus license check failed:", err));
     };
     window.addEventListener('focus', handleFocus);
 
@@ -135,12 +123,23 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
     };
   }, []);
 
-  if (checkingLicense) {
+  if (checkingLicense || isLicenseSystemEnabled === null) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <Loader2 className="w-10 h-10 text-indigo-500 animate-spin" />
           <p className="text-zinc-500 text-sm">Verifying license...</p>
+          {error && (
+            <div className="flex flex-col items-center gap-2 mt-4">
+              <p className="text-red-500 text-xs text-center max-w-xs">{error}</p>
+              <button 
+                onClick={() => window.location.reload()}
+                className="text-indigo-400 text-xs underline hover:text-indigo-300"
+              >
+                আবার চেষ্টা করুন
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
