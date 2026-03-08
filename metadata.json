@@ -1,0 +1,5 @@
+{
+  "name": "Story2Video AI",
+  "description": "Convert your stories into 2D animated videos using Gemini and Veo.",
+  "requestFramePermissions": []
+}

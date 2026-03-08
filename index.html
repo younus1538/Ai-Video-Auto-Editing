@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="error-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); color:white; padding:20px; z-index:9999; font-family:monospace; overflow:auto;">
+      <h1 style="color:#ff4444">Runtime Error</h1>
+      <pre id="error-message"></pre>
+      <button onclick="location.reload()" style="background:#444; color:white; border:none; padding:10px 20px; border-radius:5px; cursor:pointer;">Reload Page</button>
+    </div>
+    <script>
+      console.log('Index.html loaded');
+      window.addEventListener('load', function() {
+        console.log('Window load event');
+      });
+      window.onerror = function(msg, url, line, col, error) {
+        var overlay = document.getElementById('error-overlay');
+        var message = document.getElementById('error-message');
+        overlay.style.display = 'block';
+        message.textContent = msg + '\nAt: ' + url + ':' + line + ':' + col + '\n\n' + (error ? error.stack : '');
+        return false;
+      };
+      window.onunhandledrejection = function(event) {
+        var overlay = document.getElementById('error-overlay');
+        var message = document.getElementById('error-message');
+        overlay.style.display = 'block';
+        message.textContent = 'Unhandled Promise Rejection: ' + event.reason;
+      };
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
