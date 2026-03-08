@@ -6,7 +6,7 @@
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/c9fa5d47-78f6-447b-8257-e7b077ddbad6
+View your app in : https://t.me/AirdropKoP
 
 ## Run Locally
 
