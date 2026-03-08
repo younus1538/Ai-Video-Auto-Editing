@@ -11,7 +11,7 @@ const init = () => {
   if (!rootElement) return;
   const root = createRoot(rootElement);
 
-  if (window.location.pathname.startsWith('/admin')) {
+  if (window.location.pathname.includes('/admin')) {
     root.render(
       <StrictMode>
         <AdminApp />
