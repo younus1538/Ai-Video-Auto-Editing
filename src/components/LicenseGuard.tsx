@@ -93,7 +93,11 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
         }
       } catch (e: any) {
         console.error("License check failed", e);
-        setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${e.message}`);
+        if (window.location.hostname.includes('github.io')) {
+          setError("এই অ্যাপটি GitHub Pages-এ চলবে না কারণ এটি একটি Full-Stack অ্যাপ। এটি চালানোর জন্য একটি Node.js সার্ভার প্রয়োজন। দয়া করে AI Studio-র Preview লিংকটি ব্যবহার করুন।");
+        } else {
+          setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${e.message}`);
+        }
         // On network error during background check, keep current state
         if (!isBackgroundCheck) {
              setIsLicenseValid(false); 
