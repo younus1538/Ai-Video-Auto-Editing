@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "Setting": {
+      "title": "Setting",
+      "description": "Global application settings",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "string" }
+      },
+      "required": ["key", "value"]
+    },
+    "License": {
+      "title": "License",
+      "description": "User license keys",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "deviceId": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "maxVideoDuration": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "expired", "revoked"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["key", "status"]
+    },
+    "Package": {
+      "title": "Package",
+      "description": "Available license packages",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "durationDays": { "type": "number" },
+        "price": { "type": "number" },
+        "currency": { "type": "string" },
+        "maxVideoDuration": { "type": "number" }
+      },
+      "required": ["id", "name", "durationDays", "price"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Admin users",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin"] }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/settings/{settingId}": {
+      "schema": "Setting",
+      "description": "Global app configuration"
+    },
+    "/licenses/{licenseId}": {
+      "schema": "License",
+      "description": "Registered license keys"
+    },
+    "/packages/{packageId}": {
+      "schema": "Package",
+      "description": "Pricing packages"
+    },
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "Authorized admin users"
+    }
+  }
+}

@@ -4,8 +4,11 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { db } from './firebase';
+import { collection, onSnapshot, query, where, limit } from 'firebase/firestore';
 import { motion, AnimatePresence } from "framer-motion";
 import { get, set as idbSet, del as idbDel, clear as idbClear } from 'idb-keyval';
 import { 
@@ -35,6 +38,8 @@ import {
   Settings,
   FileArchive,
   Phone,
+  ShieldCheck,
+  ListChecks,
 } from "lucide-react";
 
 // --- Types ---
@@ -77,8 +82,21 @@ interface SavedProject {
 
 // --- Constants ---
 const SYSTEM_INSTRUCTION = `You are an expert cinematic director and AI story analyst.
-Your goal is to transform a story into a perfectly synchronized visual experience.
-Analyze the story deeply for:
+Your goal is to transform a story into a perfectly synchronized visual experience following a strict Automated Editing Protocol.
+
+### AUTOMATED EDITING PROTOCOL (SCENE LIST BASED)
+1. Load Scene List: You must analyze the story and break it into a structured Scene List. Each scene must have a specific story segment, description, and visual style.
+2. Voice Analysis: The story will be converted to a voiceover. You must ensure the 'textSegment' values are logical units for voice analysis.
+3. Voice Detection: The editing system will detect these text segments in the audio to find their exact locations.
+4. Timing Determination: Precise timestamps will be extracted for each scene based on the voiceover.
+5. Correct Scene Display: The system will ensure that as soon as a voice segment starts, the corresponding scene is displayed.
+6. Media Selection: Appropriate media (images/videos) will be placed on the timeline according to the Scene List.
+7. Voice & Video Sync: The final output must have perfect synchronization between what is heard and what is seen.
+8. Automated Editing: The system automates cutting, trimming, transitions, and speed adjustments based on your Scene List.
+9. Perfect Matching: You must ensure the 'textSegment' and 'description' are perfectly matched to the narrative flow.
+10. Final Integration: The end result is a fully integrated cinematic video.
+
+### CRITICAL GUIDELINES
 1. Narrative Beats: Identify exactly when the visual context changes. Ensure every significant action or setting shift is captured as a new scene.
 2. Emotional Sync: Match the visual description and image prompt to the emotional tone of the text segment.
 3. Character Identification & Consistency: This is CRITICAL. 
@@ -88,20 +106,18 @@ Analyze the story deeply for:
    - Create a detailed visual profile for each character. Use these EXACT descriptions in every scene where the character appears. They must look identical from the first scene to the last.
 4. Visual Continuity: Maintain consistent settings and environmental details across scenes.
 5. Timing & Modeling: 
-   - Ensure the 'textSegment' is a logical unit. 
    - If a text segment is longer than 5-7 seconds when spoken, break it into multiple scenes.
    - For these multiple scenes, use the SAME 'visualKey' (to reuse the same image) but DIFFERENT 'videoPrompt' values to create a "modeling" effect.
    - 'videoPrompt' MUST be one of these specific keywords: "CLOSE_UP", "WIDE_SHOT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN", "ZOOM_IN", "ZOOM_OUT", "STATIC".
-   - This allows the director to show the same image from different "camera" perspectives, making the video feel dynamic.
 6. Thoroughness: Do not summarize. Every part of the story must be represented visually in the sequence of scenes.
 
 For each scene, provide:
 - 'textSegment': The exact sentences from the story.
 - 'description': What is happening visually.
-- 'characters': A MANDATORY array of names of the characters involved in this specific scene. Use the language of the story. If no specific character is visible, use an empty array [].
-- 'imagePrompt': A highly detailed, cinematic prompt for an image generation AI. Include specific details about lighting, camera angle, character expressions, clothing textures, background elements, and artistic style.
-- 'videoPrompt': Use one of the modeling keywords: "CLOSE_UP", "WIDE_SHOT", "PAN_LEFT", "PAN_RIGHT", "PAN_UP", "PAN_DOWN", "ZOOM_IN", "ZOOM_OUT", "STATIC".
-- 'visualKey': A unique identifier for the visual context (e.g., "forest_intro", "hero_running"). If two segments share the exact same visual context, use the same 'visualKey' so the same image can be reused.
+- 'characters': A MANDATORY array of names of the characters involved in this specific scene. Use the language of the story.
+- 'imagePrompt': A highly detailed, cinematic prompt for an image generation AI.
+- 'videoPrompt': Use one of the modeling keywords.
+- 'visualKey': A unique identifier for the visual context.
 
 Style: "Strictly 2D cinematic animation, hand-drawn aesthetic, breathtakingly beautiful scenery, vibrant colors, expressive characters, professional lighting, masterpiece quality, 8k resolution, highly detailed textures."
 Output the result as a JSON array of objects with 'textSegment', 'description', 'characters', 'imagePrompt', 'videoPrompt', and 'visualKey' fields.`;
@@ -131,6 +147,14 @@ export default function App() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isResettingState, setIsResettingState] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [serverSettings, setServerSettings] = useState({
+    app_name: 'ফাউ অ্যাপ',
+    support_number: '01717775962',
+    gemini_api_key: '',
+    license_system_enabled: 'true',
+    notification_enabled: 'true',
+    notification_message: 'লাইসেন্স সিস্টেম বর্তমানে ডিএক্টিভ আছে। আপনার লাইসেন্সের মেয়াদ কমবে না।'
+  });
   const [videoLibrary, setVideoLibrary] = useState<SavedVideo[]>([]);
   const [showLibrary, setShowLibrary] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -142,12 +166,16 @@ export default function App() {
   const isCancelled = useRef(false);
   const [apiKey, setApiKey] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [isInIframe, setIsInIframe] = useState(false);
   const isResetting = useRef(false);
+
+  useEffect(() => {
+    setIsInIframe(window.self !== window.top);
+  }, []);
+
   const [licenseExpiry, setLicenseExpiry] = useState<string | null>(null);
   const [maxVideoDuration, setMaxVideoDuration] = useState<number>(0);
-  const [isLicenseSystemEnabled, setIsLicenseSystemEnabled] = useState(true);
-  const [licenseNotification, setLicenseNotification] = useState('');
-  const [isLicenseNotificationEnabled, setIsLicenseNotificationEnabled] = useState(true);
+  const [uploadedMedia, setUploadedMedia] = useState<{file: File, url: string, type: 'image'|'video'}[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -162,16 +190,24 @@ export default function App() {
       setMaxVideoDuration(parseInt(maxDuration, 10));
     }
 
-    fetch('/api/admin/license-notification')
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.json();
-      })
-      .then(data => {
-        setLicenseNotification(data.message);
-        setIsLicenseNotificationEnabled(data.enabled);
-      })
-      .catch(err => console.error("Failed to fetch license notification:", err));
+    const key = localStorage.getItem('license_key');
+    if (key) {
+      const q = query(collection(db, 'licenses'), where('key', '==', key), limit(1));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        if (!snapshot.empty) {
+          const licenseData = snapshot.docs[0].data();
+          if (licenseData.expires_at) {
+            setLicenseExpiry(licenseData.expires_at);
+            localStorage.setItem('license_expiry', licenseData.expires_at);
+          }
+          if (licenseData.max_video_duration !== undefined) {
+            setMaxVideoDuration(licenseData.max_video_duration);
+            localStorage.setItem('max_video_duration', licenseData.max_video_duration.toString());
+          }
+        }
+      });
+      return () => unsubscribe();
+    }
   }, []);
 
   const getRemainingDays = () => {
@@ -248,6 +284,15 @@ export default function App() {
     }
   };
 
+  const getLicenseHeaders = () => {
+    const key = localStorage.getItem('license_key') || '';
+    const deviceId = localStorage.getItem('device_id') || '';
+    return {
+      'x-license-key': key,
+      'x-device-id': deviceId
+    };
+  };
+
   // --- Helper: Monitor Job Status ---
   const monitorJob = async (jobId: string, startTime: number, maxWaitTime: number) => {
     setIsRecording(true);
@@ -255,7 +300,8 @@ export default function App() {
     setStatusText("ভিডিও রেন্ডার হচ্ছে...");
     let isDone = false;
     let errorCount = 0;
-    let pollInterval = 3000;
+    let pollInterval = 5000;
+    let busyCount = 0;
 
     try {
       while (!isDone) {
@@ -272,8 +318,8 @@ export default function App() {
 
           // Handle 429 Too Many Requests specifically (BEFORE JSON check)
           if (statusRes.status === 429) {
-            console.warn("Rate limited (429), backing off...");
-            pollInterval = Math.min(pollInterval * 2, 60000); // Double interval, max 60s for long videos
+            console.warn("Rate limited (429), backing off silently...");
+            pollInterval = Math.min(pollInterval * 1.5, 30000); // Backoff, max 30s
             await new Promise(resolve => setTimeout(resolve, pollInterval));
             continue; // Retry without incrementing error count
           }
@@ -299,7 +345,7 @@ export default function App() {
           
           const statusData = await statusRes.json();
           errorCount = 0; // Reset error count on success
-          pollInterval = 3000; // Reset interval on success
+          pollInterval = 5000; // Reset interval on success
           
           if (statusData.status === 'failed') {
             throw new Error(statusData.error || "ভিডিও রেন্ডার করতে সমস্যা হয়েছে।");
@@ -426,7 +472,7 @@ export default function App() {
           console.warn("Background library save failed (video might be too large):", e);
           setStatusText("ভিডিও তৈরি হয়েছে কিন্তু লাইব্রেরিতে সেভ করা যায়নি।");
         }
-      })().catch(err => console.error("Unhandled error in background library save:", err));
+      })();
 
     } catch (err: any) {
       console.error("Video assembly failed:", err);
@@ -443,6 +489,18 @@ export default function App() {
 
   // --- Persistence ---
   useEffect(() => {
+    // Real-time settings from Firestore
+    const q = query(collection(db, 'settings'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const newSettings: any = {};
+      snapshot.forEach((doc) => {
+        newSettings[doc.id] = doc.data().value;
+      });
+      if (Object.keys(newSettings).length > 0) {
+        setServerSettings(prev => ({ ...prev, ...newSettings }));
+      }
+    });
+
     const loadSavedData = async () => {
       const loadTimeout = setTimeout(() => {
         if (!isLoaded) {
@@ -578,13 +636,14 @@ export default function App() {
       }
     };
 
-    loadSavedData().catch(err => {
-      console.error("Critical error in loadSavedData:", err);
-      setIsLoaded(true); // Ensure app is not stuck in loading state
-    });
+    loadSavedData();
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
-  // Save Text and Settings to localStorage
+  // Save Text and Settings to localStorage with debouncing
   useEffect(() => {
     if (!isLoaded || isResetting.current) return;
 
@@ -598,11 +657,12 @@ export default function App() {
       apiKey
     };
     
+    // Use a longer debounce to reduce localStorage writes
     const timeout = setTimeout(() => {
       if (!isResetting.current && isLoaded) {
         localStorage.setItem('story_video_gen_data', JSON.stringify(dataToSave));
       }
-    }, 1000);
+    }, 2000);
     return () => clearTimeout(timeout);
   }, [story, characterPrompts, sceneCount, isCustomCountEnabled, isAutoImageEnabled, isAutoVoiceEnabled, apiKey, isLoaded]);
 
@@ -678,6 +738,7 @@ export default function App() {
       setIsCustomCountEnabled(false);
       setIsAutoImageEnabled(false);
       setIsAutoVoiceEnabled(false);
+      setUploadedMedia([]);
       // Do NOT clear API key on reset, as it's a user setting
       // setApiKey(''); 
       setError(null);
@@ -778,6 +839,35 @@ export default function App() {
     
     // Reset input value to allow selecting the same files again if needed
     e.target.value = '';
+  };
+
+  const handlePreUploadMedia = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+    const newMedia = files.map(file => {
+      let type: 'image' | 'video' = 'image';
+      if (file.type.startsWith('video/')) {
+          type = 'video';
+      } else if (file.type.startsWith('image/')) {
+          type = 'image';
+      } else {
+          const ext = file.name.split('.').pop()?.toLowerCase();
+          if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'm4v'].includes(ext || '')) {
+              type = 'video';
+          }
+      }
+      return { file, url: URL.createObjectURL(file), type };
+    });
+
+    setUploadedMedia(prev => [...prev, ...newMedia]);
+    e.target.value = '';
+  };
+
+  const removePreUploadedMedia = (index: number) => {
+    setUploadedMedia(prev => prev.filter((_, i) => i !== index));
   };
 
   // --- Helper: Create WAV Header for 24kHz Mono PCM ---
@@ -918,7 +1008,7 @@ Output the result as a JSON object with a 'scene_count' field (integer) and a 's
     try {
       await Promise.race([
         (async () => {
-          const keyToUse = apiKey || process.env.GEMINI_API_KEY;
+          const keyToUse = apiKey || serverSettings.gemini_api_key || process.env.GEMINI_API_KEY;
           if (!keyToUse) {
             throw new Error("API Key পাওয়া যায়নি। অনুগ্রহ করে সেটিংস থেকে আপনার Google AI Studio API Key যুক্ত করুন।");
           }
@@ -938,7 +1028,7 @@ Output the result as a JSON object with a 'scene_count' field (integer) and a 's
     
     ${isCustomCountEnabled 
       ? `STRICT REQUIREMENT: GENERATE EXACTLY ${count} SCENES. If the story is short, decompose actions into micro-moments. If long, group events efficiently. The output array MUST have length ${count}.` 
-      : `COMPREHENSIVE COVERAGE RULE: You must analyze the entire story. Do not summarize or skip any part of the story. Every single sentence, dialogue, and narrative beat must be represented in the sequence of scenes. Create a scene for every distinct action, dialogue, or location change. The goal is a full visual adaptation of the text. Ensure every single narrative beat is visualized.
+      : `COMPREHENSIVE COVERAGE RULE: You must analyze the entire story. Do not summarize or skip the middle or end. Create a scene for every distinct action, dialogue, or location change. The goal is a full visual adaptation of the text. Ensure every single narrative beat is visualized.
       
       CRITICAL INSTRUCTION: VISUALIZE EVERY MOMENT NATURALLY.
       - Create a scene for every distinct action or beat.
@@ -982,6 +1072,30 @@ Output the result as a JSON object with a 'scene_count' field (integer) and a 's
     5. Add cinematic details like "8k resolution", "highly detailed textures", "volumetric lighting", and "masterpiece quality" to every prompt.`;
           }
 
+          if (uploadedMedia.length > 0) {
+            promptParts[0].text += `\n\nI have provided ${uploadedMedia.length} media files (images/videos). They are attached in order from index 0 to ${uploadedMedia.length - 1}. For each scene, you MUST select the most appropriate media file by specifying its index in the 'mediaIndex' field. You can reuse the same mediaIndex for multiple scenes if it fits. If no media fits perfectly, pick the closest one.`;
+            
+            for (let i = 0; i < uploadedMedia.length; i++) {
+              const media = uploadedMedia[i];
+              if (media.type === 'image') {
+                const base64 = await new Promise<string>((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result as string);
+                  reader.readAsDataURL(media.file);
+                });
+                promptParts.push({
+                  inlineData: {
+                    mimeType: media.file.type || "image/jpeg",
+                    data: base64.split(',')[1]
+                  }
+                });
+                promptParts.push({ text: `[Media Index: ${i}]` });
+              } else {
+                promptParts.push({ text: `[Media Index: ${i} is a Video file named ${media.file.name}]` });
+              }
+            }
+          }
+
           const sceneResponse = await ai.models.generateContent({
             model: "gemini-3-flash-preview",
             contents: { parts: promptParts },
@@ -1005,7 +1119,8 @@ Output the result as a JSON object with a 'scene_count' field (integer) and a 's
                         },
                         imagePrompt: { type: Type.STRING },
                         videoPrompt: { type: Type.STRING },
-                        visualKey: { type: Type.STRING }
+                        visualKey: { type: Type.STRING },
+                        mediaIndex: { type: Type.INTEGER, description: "The index of the provided media file to use for this scene. Can be null." }
                       },
                       required: ["textSegment", "description", "characters", "imagePrompt", "videoPrompt", "visualKey"]
                     }
@@ -1129,7 +1244,9 @@ Output the result as a JSON object with a 'scene_count' field (integer) and a 's
                         }
                       },
                       {
-                        text: `Scene List অনুযায়ী AI দিয়ে স্বয়ংক্রিয় ভিডিও এডিটিং নির্দেশনা
+                        text: `ভিডিও এডিটিং যেভাবে সিন গুলো মিলাবে। 
+
+Scene List অনুযায়ী AI দিয়ে স্বয়ংক্রিয় ভিডিও এডিটিং নির্দেশনা
 
 ভিডিও এডিটিং করার সময় AI অবশ্যই আগে থেকে তৈরি করা Scene List অনুসরণ করবে। এই Scene List গল্প বা স্ক্রিপ্ট বিশ্লেষণ করে তৈরি করা হয়েছে এবং প্রতিটি Scene-এর সাথে গল্পের নির্দিষ্ট অংশ যুক্ত রয়েছে। AI ভিডিও এডিটিং করার সময় এই লিস্টকে মূল নির্দেশনা হিসেবে ব্যবহার করবে।
 
@@ -1158,6 +1275,7 @@ Scene List ভিত্তিক এডিটিং প্রক্রিয়�
 
 8. স্বয়ংক্রিয় ভিডিও এডিটিং
    AI নিম্নলিখিত কাজগুলো স্বয়ংক্রিয়ভাবে সম্পন্ন করবে:
+
 - ভিডিও কাট ও ট্রিম করা
 - Scene অনুযায়ী ভিডিও বসানো
 - প্রয়োজন হলে ট্রানজিশন যোগ করা
@@ -1171,7 +1289,9 @@ Scene List ভিত্তিক এডিটিং প্রক্রিয়�
     সব Scene সঠিকভাবে বসানোর পরে AI একটি সম্পূর্ণ ভিডিও তৈরি করবে যেখানে গল্প, ভয়েস এবং দৃশ্যগুলো সম্পূর্ণভাবে সমন্বিত থাকবে।
 
 উদ্দেশ্য
+
 এই পদ্ধতির মূল উদ্দেশ্য হলো:
+
 - গল্পের সাথে সম্পূর্ণ মিল রেখে ভিডিও তৈরি করা
 - ভয়েসওভারের সাথে দৃশ্যের সঠিক টাইমিং নিশ্চিত করা
 - Scene List অনুসরণ করে স্বয়ংক্রিয়ভাবে ভিডিও এডিট করা
@@ -1179,13 +1299,21 @@ Scene List ভিত্তিক এডিটিং প্রক্রিয়�
 
 ---
 CRITICAL TASK FOR YOU (THE AI):
-You are performing Steps 2, 3, and 4 of the above process.
+১. যখন সিনের অংশ বলা শুরু হবে তখনই সেই সিন দেখানো শুরু হবে। তবে সিনের শুরুতে একটি হালকা ব্লার (Blur) ইফেক্ট থাকবে যা দ্রুত পরিষ্কার হয়ে যাবে (০.৫ সেকেন্ড)।
+২. সিনের অংশটুকু বলা শেষ হওয়ার ঠিক আগে (শেষ ০.৫ সেকেন্ডে) দৃশ্যটি আস্তে আস্তে ব্লার (Blur) হয়ে যাবে। 
+৩. এই ব্লার ইফেক্টের মাধ্যমে একটি সিন অন্য একটি সিনের সাথে মিশে যাবে (Blur Transition)।
+৪. সিন লিস্টে সিনের সাথে যে গল্পের অংশটুকু আছে ওই অংশটুকু বলা শেষ হওয়ার পরই সিন পরিবর্তন হবে। একটু কম অথবা বেশি সময় নেবে না।
+৫. কোনো প্রকার গ্যাপ রাখা যাবে না।
+
+ai এর মূল কাজ হলো:
+১. গল্পের ভয়েস বিশ্লেষণ করা (Voice Detection)
+২. গল্পের অংশ শনাক্ত করা
+৩. প্রতিটি সিনের জন্য EXACT Start এবং End টাইমিং নির্ধারণ করা যাতে ব্লার ট্রানজিশনটি গল্পের সাথে নিখুঁতভাবে মিশে যায়।
+
 Listen to the provided audio and align it with the following text segments (Scene List).
 Find the EXACT start and end timestamps for each segment.
 The segments cover the ENTIRE audio. There should be no gaps.
-If there is music/silence/pauses between segments, assign that time to the most relevant segment (usually the preceding one) to maintain visual flow.
-4. CRITICAL: The total duration of all segments MUST equal the total duration of the audio file.
-5. Do not skip any segment. Every text segment must have a duration.
+STRICT RULE: সিনের অংশটুকু বলা শুরু হওয়ার সাথে সাথে ওই সিন চলে আসবে এবং বলা শেষ হওয়ার সাথে সাথে অন্য সিন চলে আসবে। এই নিয়মে লং ভিডিও বানালেও এক সেকেন্ডও কম বেশি করবে না।
 
 Text segments:
 ${parsedScenes.map((s, i) => `[Segment ${i}]: ${s.textSegment}`).join('\n')}
@@ -1243,7 +1371,7 @@ Ensure the array length matches the number of segments exactly.`
               ratio = s.textSegment.length / totalChars;
             }
             
-            return {
+            const newScene: Scene = {
               id: `scene-${Date.now()}-${i}`,
               textSegment: s.textSegment,
               description: s.description,
@@ -1255,6 +1383,16 @@ Ensure the array length matches the number of segments exactly.`
               durationRatio: ratio,
               duration: duration > 0 ? duration : undefined,
             };
+
+            if (s.mediaIndex !== undefined && s.mediaIndex !== null && s.mediaIndex >= 0 && s.mediaIndex < uploadedMedia.length) {
+              const media = uploadedMedia[s.mediaIndex];
+              newScene.mediaUrl = media.url;
+              newScene.mediaBlob = media.file;
+              newScene.mediaType = media.type;
+              newScene.status = 'completed';
+            }
+
+            return newScene;
           });
 
           setScenes(initialScenes);
@@ -1267,6 +1405,11 @@ Ensure the array length matches the number of segments exactly.`
             for (let i = 0; i < updatedScenes.length; i++) {
               const scene = updatedScenes[i];
               
+              if (scene.mediaUrl) {
+                visualKeyMap[scene.visualKey] = scene.mediaUrl;
+                continue;
+              }
+
               // Check if we already have an image for this visualKey
               if (visualKeyMap[scene.visualKey]) {
                 updatedScenes[i] = {
@@ -1304,7 +1447,7 @@ Ensure the array length matches the number of segments exactly.`
                 let base64Image = '';
                 for (const part of imgResponse.candidates?.[0]?.content?.parts || []) {
                   if (part.inlineData) {
-                    base64Image = part.inlineData.data;
+                    base64Image = part.inlineData.data || '';
                     break;
                   }
                 }
@@ -1369,10 +1512,11 @@ Ensure the array length matches the number of segments exactly.`
     if (!story.trim() || scenes.length === 0) return;
     setIsGeneratingVoice(true);
     try {
-      if (!process.env.GEMINI_API_KEY) {
+      const keyToUse = apiKey || serverSettings.gemini_api_key || process.env.GEMINI_API_KEY;
+      if (!keyToUse) {
         throw new Error("API Key পাওয়া যায়নি। অনুগ্রহ করে সেটিংস চেক করুন।");
       }
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = new GoogleGenAI({ apiKey: keyToUse });
       
       let allRawData: Uint8Array = new Uint8Array(0);
       const updatedScenes = [...scenes];
@@ -1480,6 +1624,7 @@ Ensure the array length matches the number of segments exactly.`
 
       // 2. Calculate scene timings
       let accumulatedTime = 0;
+      let idealAccumulatedTime = 0;
       const FPS = 30;
       
       const timedScenes = scenes.map((scene, i) => {
@@ -1487,7 +1632,7 @@ Ensure the array length matches the number of segments exactly.`
         const sceneDurationRatio = scene.durationRatio || (1 / scenes.length);
         const idealDuration = sceneDurationRatio * duration;
         
-        const actualStartTime = accumulatedTime;
+        idealAccumulatedTime += idealDuration;
         
         let actualEndTime;
         if (isLast) {
@@ -1495,11 +1640,10 @@ Ensure the array length matches the number of segments exactly.`
            actualEndTime = duration;
         } else {
            // For intermediate scenes, snap to the nearest frame to avoid cumulative drift
-           // Calculate target end time based on ideal duration
-           const targetEndTime = actualStartTime + idealDuration;
-           // Snap to 30fps grid
-           actualEndTime = Math.round(targetEndTime * FPS) / FPS;
+           actualEndTime = Math.round(idealAccumulatedTime * FPS) / FPS;
         }
+        
+        const actualStartTime = accumulatedTime;
         
         // Update accumulated time for the next scene
         accumulatedTime = actualEndTime;
@@ -1512,25 +1656,78 @@ Ensure the array length matches the number of segments exactly.`
       });
 
       // 3. Create Job
-      const jobRes = await fetch('/api/jobs', { method: 'POST' });
-      if (!jobRes.ok) throw new Error("জব তৈরি করতে সমস্যা হয়েছে।");
+      const jobRes = await fetch('/api/jobs', { 
+        method: 'POST',
+        headers: getLicenseHeaders()
+      });
+      if (!jobRes.ok) {
+        const errData = await jobRes.json().catch(() => ({}));
+        throw new Error(errData.error || "জব তৈরি করতে সমস্যা হয়েছে।");
+      }
       const { jobId } = await jobRes.json();
 
       // 4. Upload Audio
-      const audioRes = await fetch(audioUrl);
-      const audioBlob = await audioRes.blob();
-      const audioForm = new FormData();
-      audioForm.append('fieldname', 'audio');
-      audioForm.append('file', audioBlob, 'audio.mp3');
-      
       setRecordingProgress(5);
-      await fetch(`/api/jobs/${jobId}/upload`, { method: 'POST', body: audioForm });
+      if (audioUrl.startsWith('http') && !audioUrl.startsWith('blob:')) {
+        const uploadAudioRes = await fetch(`/api/jobs/${jobId}/upload`, { 
+          method: 'POST', 
+          headers: {
+            'Content-Type': 'application/json',
+            ...getLicenseHeaders()
+          },
+          body: JSON.stringify({ 
+            fieldname: 'audio',
+            url: audioUrl
+          })
+        });
+        if (!uploadAudioRes.ok) {
+          const errData = await uploadAudioRes.json().catch(() => ({}));
+          throw new Error(errData.error || "অডিও লিঙ্ক থেকে ডাউনলোড করতে সমস্যা হয়েছে।");
+        }
+      } else {
+        const audioRes = await fetch(audioUrl);
+        const audioBlob = await audioRes.blob();
+        const audioForm = new FormData();
+        audioForm.append('fieldname', 'audio');
+        audioForm.append('file', audioBlob, 'audio.mp3');
+        
+        const uploadAudioRes = await fetch(`/api/jobs/${jobId}/upload`, { 
+          method: 'POST', 
+          body: audioForm,
+          headers: getLicenseHeaders()
+        });
+        if (!uploadAudioRes.ok) {
+          const errData = await uploadAudioRes.json().catch(() => ({}));
+          throw new Error(errData.error || "অডিও আপলোড করতে সমস্যা হয়েছে।");
+        }
+      }
 
       // 5. Upload Media Files
       setStatusText("ছবি ও ভিডিও আপলোড হচ্ছে...");
       for (let i = 0; i < timedScenes.length; i++) {
         const scene = timedScenes[i];
         if (scene.mediaUrl || scene.mediaBlob) {
+          if (scene.mediaUrl && scene.mediaUrl.startsWith('http') && !scene.mediaUrl.startsWith('blob:')) {
+            // Public URL - send to server
+            const uploadMediaRes = await fetch(`/api/jobs/${jobId}/upload`, { 
+              method: 'POST', 
+              headers: {
+                'Content-Type': 'application/json',
+                ...getLicenseHeaders()
+              },
+              body: JSON.stringify({ 
+                fieldname: `media_${i}`,
+                url: scene.mediaUrl
+              })
+            });
+            if (!uploadMediaRes.ok) {
+              const errData = await uploadMediaRes.json().catch(() => ({}));
+              throw new Error(errData.error || `সিন ${i+1} লিঙ্ক থেকে ডাউনলোড করতে সমস্যা হয়েছে।`);
+            }
+            setRecordingProgress(5 + Math.floor(((i + 1) / timedScenes.length) * 15));
+            continue;
+          }
+
           let mediaBlob: Blob;
           
           if (scene.mediaBlob) {
@@ -1550,7 +1747,15 @@ Ensure the array length matches the number of segments exactly.`
           mediaForm.append('fieldname', `media_${i}`);
           mediaForm.append('file', mediaBlob, `media_${i}${ext}`);
           
-          await fetch(`/api/jobs/${jobId}/upload`, { method: 'POST', body: mediaForm });
+          const uploadMediaRes = await fetch(`/api/jobs/${jobId}/upload`, { 
+            method: 'POST', 
+            body: mediaForm,
+            headers: getLicenseHeaders()
+          });
+          if (!uploadMediaRes.ok) {
+            const errData = await uploadMediaRes.json().catch(() => ({}));
+            throw new Error(errData.error || `সিন ${i+1} আপলোড করতে সমস্যা হয়েছে।`);
+          }
           setRecordingProgress(5 + Math.floor(((i + 1) / timedScenes.length) * 15)); // Up to 20%
         }
       }
@@ -1559,10 +1764,16 @@ Ensure the array length matches the number of segments exactly.`
       setStatusText("আপলোড সম্পন্ন! রেন্ডারিং শুরু হচ্ছে...");
       const renderRes = await fetch(`/api/jobs/${jobId}/render`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...getLicenseHeaders()
+        },
         body: JSON.stringify({ metadata: timedScenes })
       });
-      if (!renderRes.ok) throw new Error("রেন্ডার শুরু করতে সমস্যা হয়েছে।");
+      if (!renderRes.ok) {
+        const errData = await renderRes.json().catch(() => ({}));
+        throw new Error(errData.error || "রেন্ডার শুরু করতে সমস্যা হয়েছে।");
+      }
 
       // 7. Monitor Job (Resume-able)
       setRecordingProgress(0);
@@ -1681,19 +1892,6 @@ Ensure the array length matches the number of segments exactly.`
     });
   };
 
-  // Auto-download when video is ready (only for new server-generated videos)
-  useEffect(() => {
-    if (finalVideoUrl && finalVideoUrl.includes('/api/jobs/')) {
-      const downloadUrl = finalVideoUrl.replace('?action=view', '-zip');
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.setAttribute('download', 'story.zip'); // Ensure download attribute is set
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-  }, [finalVideoUrl]);
-
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-sans selection:bg-indigo-500/30">
       {/* Header */}
@@ -1710,7 +1908,7 @@ Ensure the array length matches the number of segments exactly.`
                 <Video className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
               </div>
               <span className="font-bold text-xl sm:text-2xl tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent group-hover:opacity-80 transition-opacity">
-                AirdropKoP
+                {serverSettings.app_name}
               </span>
             </a>
           </div>
@@ -1754,12 +1952,12 @@ Ensure the array length matches the number of segments exactly.`
         </div>
       </header>
 
-      {isLicenseNotificationEnabled && (
+      {serverSettings.notification_enabled === 'true' && (
         <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-4 py-2 text-center backdrop-blur-sm sticky top-16 z-40">
           <div className="text-yellow-500 text-sm font-medium flex items-center justify-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <div className="prose prose-sm prose-yellow max-w-none">
-              <Markdown>{licenseNotification || 'লাইসেন্স সিস্টেম বর্তমানে ডিএক্টিভ আছে। আপনার লাইসেন্সের মেয়াদ কমবে না।'}</Markdown>
+              <Markdown>{serverSettings.notification_message || 'লাইসেন্স সিস্টেম বর্তমানে ডিএক্টিভ আছে। আপনার লাইসেন্সের মেয়াদ কমবে না।'}</Markdown>
             </div>
           </div>
         </div>
@@ -1819,36 +2017,46 @@ Ensure the array length matches the number of segments exactly.`
                 </div>
 
                 <div className="pt-4 border-t border-white/5">
-                  <div className="mb-4 space-y-2">
-                    <label className="text-sm font-medium text-zinc-300 block">
-                      লাইসেন্স মেয়াদ
-                    </label>
-                    <div className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-zinc-400 flex items-center justify-between">
-                      {licenseExpiry ? (
-                        <>
-                          <span className={getRemainingDays() < 3 ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
-                            {getRemainingDays()} দিন বাকি
-                          </span>
-                          <span className="text-xs text-zinc-500">
-                            ({new Date(licenseExpiry).toLocaleDateString()})
-                          </span>
-                        </>
-                      ) : (
-                        <span className="text-zinc-500 italic">তথ্য পাওয়া যায়নি</span>
-                      )}
+                  {serverSettings.license_system_enabled !== 'true' ? (
+                    <div className="mb-4 space-y-2">
+                      <div className="w-full bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-emerald-400 text-center font-medium">
+                        লাইসেন্স সিস্টেম বর্তমানে ডিএক্টিভ আছে। অ্যাপটি এখন সম্পূর্ণ ফ্রি!
+                      </div>
                     </div>
-                  </div>
-                  
-                  <div className="mb-4 space-y-2">
-                    <label className="text-sm font-medium text-zinc-300 block">
-                      সর্বোচ্চ ভিডিও রেন্ডারিং লিমিট
-                    </label>
-                    <div className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-zinc-400 flex items-center justify-between">
-                      <span className="text-emerald-400 font-bold">
-                        {maxVideoDuration ? `${maxVideoDuration} মিনিট` : 'আনলিমিটেড'}
-                      </span>
-                    </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="mb-4 space-y-2">
+                        <label className="text-sm font-medium text-zinc-300 block">
+                          লাইসেন্স মেয়াদ
+                        </label>
+                        <div className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-zinc-400 flex items-center justify-between">
+                          {licenseExpiry ? (
+                            <>
+                              <span className={getRemainingDays() < 3 ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
+                                {getRemainingDays()} দিন বাকি
+                              </span>
+                              <span className="text-xs text-zinc-500">
+                                ({new Date(licenseExpiry).toLocaleDateString()})
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-zinc-500 italic">তথ্য পাওয়া যায়নি</span>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="mb-4 space-y-2">
+                        <label className="text-sm font-medium text-zinc-300 block">
+                          সর্বোচ্চ ভিডিও রেন্ডারিং লিমিট
+                        </label>
+                        <div className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-zinc-400 flex items-center justify-between">
+                          <span className="text-emerald-400 font-bold">
+                            {maxVideoDuration ? `${maxVideoDuration} মিনিট` : 'আনলিমিটেড'}
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="pt-4 border-t border-white/5">
@@ -1858,7 +2066,7 @@ Ensure the array length matches the number of segments exactly.`
                     </label>
                     <div className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-zinc-400 flex items-center gap-2">
                       <Phone className="w-4 h-4" />
-                      <span>01717775962</span>
+                      <span>{serverSettings.support_number}</span>
                     </div>
                   </div>
                   <button
@@ -1867,6 +2075,8 @@ Ensure the array length matches the number of segments exactly.`
                   >
                     সেভ করুন
                   </button>
+                  
+                  {/* Admin link removed from UI for security. Access via /admin URL directly. */}
                 </div>
               </div>
             </motion.div>
@@ -1940,7 +2150,12 @@ Ensure the array length matches the number of segments exactly.`
       </AnimatePresence>
 
       <main className="max-w-7xl mx-auto px-6 py-12">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, ease: "easeOut" }}
+          className="grid grid-cols-1 lg:grid-cols-12 gap-12"
+        >
           
           {/* Left Column: Input */}
           <div className="lg:col-span-5 space-y-8">
@@ -2106,7 +2321,7 @@ Ensure the array length matches the number of segments exactly.`
                           min="1"
                           max="500"
                           step="1"
-                          value={sceneCount === '' ? 1 : Math.min(parseInt(sceneCount.toString()) || 1, 500)}
+                          value={typeof sceneCount === 'number' && !isNaN(sceneCount) ? sceneCount : 1}
                           onChange={(e) => setSceneCount(parseInt(e.target.value))}
                           className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                         />
@@ -2583,15 +2798,29 @@ Ensure the array length matches the number of segments exactly.`
                     <motion.div
                       key={scene.id}
                       layout
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.2 } }}
+                      transition={{ 
+                        type: "spring",
+                        stiffness: 300,
+                        damping: 30,
+                        opacity: { duration: 0.4 }
+                      }}
                       className="bg-zinc-900/30 border border-white/5 rounded-2xl overflow-hidden"
                     >
                       <div className="flex flex-col md:flex-row">
-                        <div className="w-full md:w-48 aspect-video md:aspect-square bg-black relative group">
-                          {scene.mediaUrl ? (
-                            <>
-                              {scene.mediaType === 'video' ? (
+                        <div className="w-full md:w-48 aspect-video md:aspect-square bg-black relative group overflow-hidden">
+                          <AnimatePresence mode="wait">
+                            {scene.mediaUrl ? (
+                              <motion.div 
+                                key="media"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="w-full h-full"
+                              >
+                                {scene.mediaType === 'video' ? (
                                 <div className="relative w-full h-full">
                                   <video 
                                     src={scene.mediaUrl} 
@@ -2639,51 +2868,15 @@ Ensure the array length matches the number of segments exactly.`
                                   <span className="text-[10px] text-zinc-500">ফাইলটি রেন্ডারিং-এর সময় প্রসেস করা হবে।</span>
                                 </div>
                               )}
-                              {/* Edit button (Visible on mobile, and on desktop hover) */}
-                              <div className="absolute top-2 right-2 z-10 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-200 flex gap-2">
-                                {projectMode === 'image' ? (
-                                  <label 
-                                    className="flex items-center justify-center w-8 h-8 bg-black/60 rounded-full cursor-pointer text-white backdrop-blur-md border border-white/10 shadow-lg hover:bg-indigo-600 transition-colors"
-                                    title="ছবি পরিবর্তন করুন"
-                                  >
-                                    <ImageIcon className="w-4 h-4" />
-                                    <input 
-                                      type="file" 
-                                      accept="image/*" 
-                                      className="hidden" 
-                                      onChange={(e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) {
-                                          const objectUrl = URL.createObjectURL(file);
-                                          updateSceneData(scene.id, { mediaUrl: objectUrl, mediaBlob: file, mediaType: 'image', status: 'completed', error: undefined });
-                                        }
-                                      }}
-                                    />
-                                  </label>
-                                ) : (
-                                  <label 
-                                    className="flex items-center justify-center w-8 h-8 bg-black/60 rounded-full cursor-pointer text-white backdrop-blur-md border border-white/10 shadow-lg hover:bg-indigo-600 transition-colors"
-                                    title="ভিডিও পরিবর্তন করুন"
-                                  >
-                                    <Video className="w-4 h-4" />
-                                    <input 
-                                      type="file" 
-                                      accept="video/*" 
-                                      className="hidden" 
-                                      onChange={(e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) {
-                                          const objectUrl = URL.createObjectURL(file);
-                                          updateSceneData(scene.id, { mediaUrl: objectUrl, mediaBlob: file, mediaType: 'video', status: 'completed', error: undefined });
-                                        }
-                                      }}
-                                    />
-                                  </label>
-                                )}
-                              </div>
-                            </>
+                            </motion.div>
                           ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center bg-zinc-950 group/upload relative">
+                            <motion.div 
+                              key="placeholder"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              className="w-full h-full flex flex-col items-center justify-center bg-zinc-950 group/upload relative"
+                            >
                               {scene.status === 'generating-image' ? (
                                 <div className="flex flex-col items-center gap-3">
                                   <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
@@ -2735,9 +2928,55 @@ Ensure the array length matches the number of segments exactly.`
                                   </div>
                                 </div>
                               )}
-                            </div>
+                            </motion.div>
                           )}
-                        </div>
+                        </AnimatePresence>
+
+                        {/* Edit button (Visible on mobile, and on desktop hover) */}
+                        {scene.mediaUrl && (
+                          <div className="absolute top-2 right-2 z-10 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-200 flex gap-2">
+                            {projectMode === 'image' ? (
+                              <label 
+                                className="flex items-center justify-center w-8 h-8 bg-black/60 rounded-full cursor-pointer text-white backdrop-blur-md border border-white/10 shadow-lg hover:bg-indigo-600 transition-colors"
+                                title="ছবি পরিবর্তন করুন"
+                              >
+                                <ImageIcon className="w-4 h-4" />
+                                <input 
+                                  type="file" 
+                                  accept="image/*" 
+                                  className="hidden" 
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) {
+                                      const objectUrl = URL.createObjectURL(file);
+                                      updateSceneData(scene.id, { mediaUrl: objectUrl, mediaBlob: file, mediaType: 'image', status: 'completed', error: undefined });
+                                    }
+                                  }}
+                                />
+                              </label>
+                            ) : (
+                              <label 
+                                className="flex items-center justify-center w-8 h-8 bg-black/60 rounded-full cursor-pointer text-white backdrop-blur-md border border-white/10 shadow-lg hover:bg-indigo-600 transition-colors"
+                                title="ভিডিও পরিবর্তন করুন"
+                              >
+                                <Video className="w-4 h-4" />
+                                <input 
+                                  type="file" 
+                                  accept="video/*" 
+                                  className="hidden" 
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) {
+                                      const objectUrl = URL.createObjectURL(file);
+                                      updateSceneData(scene.id, { mediaUrl: objectUrl, mediaBlob: file, mediaType: 'video', status: 'completed', error: undefined });
+                                    }
+                                  }}
+                                />
+                              </label>
+                            )}
+                          </div>
+                        )}
+                      </div>
                         
                         <div className="p-6 flex-1 space-y-4">
                           <div className="flex items-center justify-between">
@@ -2803,12 +3042,12 @@ Ensure the array length matches the number of segments exactly.`
                                       onClick={async () => {
                                         if (scene.status === 'generating-image') return;
                                         
-                                        const keyToUse = apiKey || process.env.GEMINI_API_KEY;
+                                        const keyToUse = apiKey || serverSettings.gemini_api_key || process.env.GEMINI_API_KEY;
                                         if (!keyToUse) {
                                           setError("API Key পাওয়া যায়নি। সেটিংস থেকে যুক্ত করুন।");
                                           return;
                                         }
-
+                                        
                                         updateSceneData(scene.id, { status: 'generating-image', error: undefined });
                                         
                                         try {
@@ -2833,7 +3072,7 @@ Ensure the array length matches the number of segments exactly.`
                                           let base64Image = '';
                                           for (const part of imgResponse.candidates?.[0]?.content?.parts || []) {
                                             if (part.inlineData) {
-                                              base64Image = part.inlineData.data;
+                                              base64Image = part.inlineData.data || '';
                                               break;
                                             }
                                           }
@@ -2947,7 +3186,7 @@ Ensure the array length matches the number of segments exactly.`
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
       </main>
 
       {/* Hidden Canvas for Recording - Must be in DOM and not 'display: none' for requestAnimationFrame */}

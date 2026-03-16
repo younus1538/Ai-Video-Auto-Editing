@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Key, Lock, Phone } from 'lucide-react';
+import { Key, Lock, Phone, ShieldCheck } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { db } from '../firebase';
+import { collection, query, where, getDocs, limit, updateDoc, doc, onSnapshot } from 'firebase/firestore';
 
 interface LicenseActivationProps {
   onActivated: () => void;
@@ -11,14 +14,15 @@ const LicenseActivation: React.FC<LicenseActivationProps> = ({ onActivated }) =>
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [deviceId, setDeviceId] = useState('');
+  const [showTransferConfirm, setShowTransferConfirm] = useState<{id: string, key: string, data: any} | null>(null);
 
   const [packages, setPackages] = useState<any[]>([]);
+  const [publicSettings, setPublicSettings] = useState({
+    app_name: 'AI Video Creator',
+    support_number: '01717775962'
+  });
 
   useEffect(() => {
-    // Pre-fill key if available
-    const storedKey = localStorage.getItem('license_key');
-    if (storedKey) setKey(storedKey);
-
     // Generate or retrieve a persistent device ID
     let id = localStorage.getItem('device_id');
     if (!id) {
@@ -27,18 +31,29 @@ const LicenseActivation: React.FC<LicenseActivationProps> = ({ onActivated }) =>
     }
     setDeviceId(id);
 
-    // Fetch packages
-    fetch('/api/licenses/packages')
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.json();
-      })
-      .then(data => {
-        if (Array.isArray(data)) {
-          setPackages(data);
-        }
-      })
-      .catch(err => console.error("Failed to fetch packages:", err));
+    // Real-time settings from Firestore
+    const settingsUnsubscribe = onSnapshot(collection(db, 'settings'), (snapshot) => {
+      const newSettings: any = { ...publicSettings };
+      snapshot.forEach((doc) => {
+        newSettings[doc.id] = doc.data().value;
+      });
+      setPublicSettings(newSettings);
+    });
+
+    // Real-time packages from Firestore
+    const packagesQ = query(collection(db, 'packages'), where('active', '==', true));
+    const packagesUnsubscribe = onSnapshot(packagesQ, (snapshot) => {
+      const pkgList: any[] = [];
+      snapshot.forEach((doc) => {
+        pkgList.push({ id: doc.id, ...doc.data() });
+      });
+      setPackages(pkgList);
+    });
+
+    return () => {
+      settingsUnsubscribe();
+      packagesUnsubscribe();
+    };
   }, []);
 
   const handleVerify = async (e: React.FormEvent) => {
@@ -47,39 +62,88 @@ const LicenseActivation: React.FC<LicenseActivationProps> = ({ onActivated }) =>
     setError('');
 
     try {
-      const res = await fetch('/api/licenses/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, deviceId, activate: true }),
+      const q = query(collection(db, 'licenses'), where('key', '==', key.trim().toUpperCase()), limit(1));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        throw new Error('Invalid license key');
+      }
+
+      const licenseDoc = querySnapshot.docs[0];
+      const licenseData = licenseDoc.data();
+
+      if (licenseData.status === 'active') {
+        // If already active on THIS device, just log in
+        if (licenseData.device_id === deviceId) {
+          localStorage.setItem('license_key', key.trim().toUpperCase());
+          localStorage.setItem('license_expiry', licenseData.expires_at);
+          if (licenseData.max_video_duration !== undefined) {
+            localStorage.setItem('max_video_duration', licenseData.max_video_duration.toString());
+          }
+          onActivated();
+          return;
+        } else {
+          // If active on ANOTHER device, ask for confirmation to transfer
+          setShowTransferConfirm({ id: licenseDoc.id, key: key.trim().toUpperCase(), data: licenseData });
+          setLoading(false);
+          return;
+        }
+      }
+
+      if (licenseData.status === 'expired') {
+        throw new Error('This license has expired');
+      }
+
+      if (licenseData.status === 'suspended') {
+        throw new Error('This license has been suspended');
+      }
+
+      // Activate license
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + (licenseData.days * 24 * 60 * 60 * 1000));
+      
+      await updateDoc(doc(db, 'licenses', licenseDoc.id), {
+        status: 'active',
+        device_id: deviceId,
+        activated_at: now.toISOString(),
+        expires_at: expiresAt.toISOString()
       });
 
-      const text = await res.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (e) {
-        console.error("Failed to parse verify response:", text);
-        throw new Error(`Server returned invalid response: ${text.substring(0, 50)}...`);
+      localStorage.setItem('license_key', key.trim().toUpperCase());
+      localStorage.setItem('license_expiry', expiresAt.toISOString());
+      if (licenseData.max_video_duration !== undefined) {
+        localStorage.setItem('max_video_duration', licenseData.max_video_duration.toString());
       }
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Verification failed');
-      }
-
-      if (data.success) {
-        localStorage.setItem('license_key', key);
-        localStorage.setItem('license_expiry', data.expiresAt);
-        if (data.maxVideoDuration !== undefined) {
-          localStorage.setItem('max_video_duration', data.maxVideoDuration.toString());
-        }
-        onActivated();
-      } else if (data.error) {
-        throw new Error(data.error);
-      }
+      onActivated();
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const confirmTransfer = async () => {
+    if (!showTransferConfirm) return;
+    setLoading(true);
+    setError('');
+
+    try {
+      await updateDoc(doc(db, 'licenses', showTransferConfirm.id), {
+        device_id: deviceId,
+        last_transferred_at: new Date().toISOString()
+      });
+      
+      localStorage.setItem('license_key', showTransferConfirm.key);
+      localStorage.setItem('license_expiry', showTransferConfirm.data.expires_at);
+      if (showTransferConfirm.data.max_video_duration !== undefined) {
+        localStorage.setItem('max_video_duration', showTransferConfirm.data.max_video_duration.toString());
+      }
+      onActivated();
+    } catch (err: any) {
+      setError('ট্রান্সফার করতে সমস্যা হয়েছে: ' + err.message);
+    } finally {
+      setLoading(false);
+      setShowTransferConfirm(null);
     }
   };
 
@@ -158,14 +222,61 @@ const LicenseActivation: React.FC<LicenseActivationProps> = ({ onActivated }) =>
 
             <div className="text-center">
               <p className="text-zinc-500 text-xs mb-2 uppercase tracking-wider font-semibold">To Purchase Contact</p>
-              <a href="tel:01717775962" className="flex items-center justify-center gap-2 text-indigo-400 font-bold bg-indigo-500/10 py-3 rounded-xl border border-indigo-500/20 hover:bg-indigo-500/20 transition-all group">
+              <a href={`tel:${publicSettings.support_number}`} className="flex items-center justify-center gap-2 text-indigo-400 font-bold bg-indigo-500/10 py-3 rounded-xl border border-indigo-500/20 hover:bg-indigo-500/20 transition-all group">
                 <Phone className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                <span className="tracking-wide">01717775962</span>
+                <span className="tracking-wide">{publicSettings.support_number}</span>
               </a>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-zinc-800/50 flex justify-center">
+              <Link 
+                to="/admin" 
+                className="text-xs text-zinc-500 hover:text-indigo-400 transition-colors flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-white/5"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                এডমিন লগইন
+              </Link>
             </div>
           </div>
         </div>
       </motion.div>
+      
+      {showTransferConfirm && (
+        <div className="fixed inset-0 z-[10000] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-2xl"
+          >
+            <div className="flex justify-center mb-4">
+              <div className="w-12 h-12 bg-orange-500/10 rounded-full flex items-center justify-center border border-orange-500/20">
+                <ShieldCheck className="w-6 h-6 text-orange-400" />
+              </div>
+            </div>
+            <h3 className="text-lg font-bold text-white text-center mb-2">লাইসেন্স ট্রান্সফার করুন</h3>
+            <p className="text-zinc-400 text-center text-sm mb-6">
+              এই লাইসেন্সটি অন্য একটি ডিভাইসে সক্রিয় আছে। আপনি কি এটি এই ডিভাইসে ট্রান্সফার করতে চান? 
+              <br />
+              <span className="text-orange-400 font-medium">(আগের ডিভাইস থেকে এটি ডিঅ্যাক্টিভেট হয়ে যাবে)</span>
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setShowTransferConfirm(null)}
+                className="flex-1 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl font-medium transition-all"
+              >
+                বাতিল
+              </button>
+              <button 
+                onClick={confirmTransfer}
+                disabled={loading}
+                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-indigo-600/20 disabled:opacity-50"
+              >
+                {loading ? 'অপেক্ষা করুন...' : 'হ্যাঁ, ট্রান্সফার করুন'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 };

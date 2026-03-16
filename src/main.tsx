@@ -1,7 +1,10 @@
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import App from './App';
 import { AdminApp } from './AdminApp';
+import { FirebaseProvider } from './FirebaseProvider';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import LicenseGuard from './components/LicenseGuard';
 import './index.css';
 
@@ -11,21 +14,24 @@ const init = () => {
   if (!rootElement) return;
   const root = createRoot(rootElement);
 
-  if (window.location.pathname.includes('/admin')) {
-    root.render(
-      <StrictMode>
-        <AdminApp />
-      </StrictMode>
-    );
-  } else {
-    root.render(
-      <StrictMode>
-        <LicenseGuard>
-          <App />
-        </LicenseGuard>
-      </StrictMode>
-    );
-  }
+  root.render(
+    <StrictMode>
+      <ErrorBoundary>
+        <FirebaseProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={
+                <LicenseGuard>
+                  <App />
+                </LicenseGuard>
+              } />
+              <Route path="/admin" element={<AdminApp />} />
+            </Routes>
+          </BrowserRouter>
+        </FirebaseProvider>
+      </ErrorBoundary>
+    </StrictMode>
+  );
 };
 
 if (document.readyState === 'loading') {

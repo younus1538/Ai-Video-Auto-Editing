@@ -1,101 +1,106 @@
-import React, { useState } from 'react';
-import { Lock, User, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Lock, Loader2, ArrowLeft, LogIn } from 'lucide-react';
+import { auth, googleProvider, signInWithPopup } from '../../firebase';
 
 interface AdminLoginProps {
   onLogin: (token: string) => void;
 }
 
 export const AdminLogin: React.FC<AdminLoginProps> = ({ onLogin }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [currentDomain, setCurrentDomain] = useState('');
+  const [isInIframe, setIsInIframe] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    setCurrentDomain(window.location.hostname);
+    setIsInIframe(window.self !== window.top);
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    if (isInIframe) {
+      setError('নিরাপত্তার স্বার্থে অ্যাপের ভিতর থেকে এডমিন প্যানেল লগইন করা যাবে না। দয়া করে নতুন ট্যাবে অ্যাপটি ওপেন করে লগইন করুন।');
+      return;
+    }
     setLoading(true);
     setError('');
-
     try {
-      const response = await fetch('/api/admin/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-
-      const data = await response.json();
-      if (response.ok) {
-        onLogin(data.token);
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+      
+      // Check if user is the authorized admin
+      if (user.email === 'bdyounus691@gmail.com') {
+        const token = await user.getIdToken();
+        onLogin(token);
       } else {
-        setError(data.error || 'Login failed');
+        await auth.signOut();
+        setError('Unauthorized access. Only the super admin can log in.');
       }
-    } catch (err) {
-      setError('Connection error. Please try again.');
+    } catch (err: any) {
+      console.error('Login failed:', err);
+      setError(`Login failed: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 p-4">
-      <div className="w-full max-w-md bg-zinc-900/50 border border-zinc-800 rounded-2xl p-8 backdrop-blur-xl">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-[#111111] p-4 relative">
+      <div className="absolute top-6 left-6 flex items-center gap-4">
+        <button
+          onClick={() => window.location.href = '/'}
+          className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-lg"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back to App
+        </button>
+      </div>
+      
+      <div className="w-full max-w-md bg-[#1a1a1a] border border-zinc-800/50 rounded-3xl p-8 shadow-2xl">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center mb-4 border border-emerald-500/20">
-            <Lock className="w-8 h-8 text-emerald-500" />
+          <div className="w-16 h-16 bg-[#132b20] rounded-2xl flex items-center justify-center mb-6 border border-emerald-500/20">
+            <Lock className="w-8 h-8 text-emerald-500" strokeWidth={1.5} />
           </div>
-          <h1 className="text-2xl font-bold text-white">Admin Access</h1>
-          <p className="text-zinc-400 text-sm mt-1">Enter your credentials to continue</p>
+          <h1 className="text-3xl font-bold text-white mb-2">Admin Access</h1>
+          <p className="text-zinc-400 text-sm text-center">Sign in with your authorized Google<br/>account</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-zinc-300 ml-1">Username</label>
-            <div className="relative">
-              <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-500" />
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full bg-zinc-800/50 border border-zinc-700 rounded-xl py-3 pl-10 pr-4 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition-all"
-                placeholder="Enter username"
-                required
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-zinc-300 ml-1">Password</label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-500" />
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-zinc-800/50 border border-zinc-700 rounded-xl py-3 pl-10 pr-4 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition-all"
-                placeholder="Enter password"
-                required
-              />
-            </div>
-          </div>
-
+        <div className="space-y-6">
           {error && (
             <div className="bg-red-500/10 border border-red-500/20 text-red-500 text-sm py-3 px-4 rounded-xl">
               {error}
             </div>
           )}
 
+          <div className="bg-[#2a2211] border border-[#5c4315] rounded-2xl p-5">
+            <h3 className="text-[#eab308] font-medium mb-3">আপনার বর্তমান ডোমেইন</h3>
+            <div className="bg-[#1f1a10] rounded-xl p-4 mb-4 font-mono text-zinc-300 text-sm break-all">
+              {currentDomain}
+            </div>
+            <p className="text-zinc-400 text-sm leading-relaxed">
+              লগইন করতে গেলে auth/unauthorized-domain এলে এই ডোমেইনটা Firebase Console → Authentication → Settings → Authorized domains এ গিয়ে Add domain করে যোগ করুন (শুধু উপরের নাম, পোর্ট নয়)।
+            </p>
+          </div>
+
           <button
-            type="submit"
+            onClick={handleGoogleLogin}
             disabled={loading}
-            className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed mt-6 shadow-lg shadow-emerald-500/20"
+            className="w-full bg-white text-black hover:bg-zinc-200 font-semibold py-4 rounded-2xl transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg text-lg"
           >
             {loading ? (
               <Loader2 className="w-5 h-5 animate-spin" />
             ) : (
-              'Sign In'
+              <>
+                <LogIn className="w-5 h-5" />
+                Sign in with Google
+              </>
             )}
           </button>
-        </form>
+          
+          <p className="text-center text-sm text-zinc-500 mt-6">
+            Authorized Email: bdyounus691@gmail.com
+          </p>
+        </div>
       </div>
     </div>
   );

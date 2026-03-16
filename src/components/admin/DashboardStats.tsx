@@ -9,6 +9,8 @@ import {
   Shield,
   Clock
 } from 'lucide-react';
+import { db } from '../../firebase';
+import { collection, onSnapshot } from 'firebase/firestore';
 
 interface Stats {
   totalLicenses: number;
@@ -17,27 +19,41 @@ interface Stats {
   totalPackages: number;
 }
 
-export const DashboardStats: React.FC<{ token: string; onNavigate: (tab: string) => void }> = ({ token, onNavigate }) => {
-  const [stats, setStats] = useState<Stats | null>(null);
+export const DashboardStats: React.FC<{ token: string; onNavigate: (tab: string) => void }> = ({ onNavigate }) => {
+  const [stats, setStats] = useState<Stats>({
+    totalLicenses: 0,
+    activeLicenses: 0,
+    expiredLicenses: 0,
+    totalPackages: 0
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/admin/stats', {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-      .then(res => {
-        if (!res.ok) throw new Error('Failed to fetch stats');
-        return res.json();
-      })
-      .then(data => {
-        setStats(data);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoading(false);
-      });
-  }, [token]);
+    // Real-time licenses stats
+    const licensesUnsubscribe = onSnapshot(collection(db, 'licenses'), (snapshot) => {
+      const licenses = snapshot.docs.map(doc => doc.data());
+      setStats(prev => ({
+        ...prev,
+        totalLicenses: licenses.length,
+        activeLicenses: licenses.filter(l => l.status === 'active').length,
+        expiredLicenses: licenses.filter(l => l.status === 'expired').length
+      }));
+      setLoading(false);
+    });
+
+    // Real-time packages stats
+    const packagesUnsubscribe = onSnapshot(collection(db, 'packages'), (snapshot) => {
+      setStats(prev => ({
+        ...prev,
+        totalPackages: snapshot.size
+      }));
+    });
+
+    return () => {
+      licensesUnsubscribe();
+      packagesUnsubscribe();
+    };
+  }, []);
 
   if (loading) return <div className="animate-pulse space-y-4">
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -46,10 +62,10 @@ export const DashboardStats: React.FC<{ token: string; onNavigate: (tab: string)
   </div>;
 
   const cards = [
-    { label: 'Total Licenses', value: stats?.totalLicenses, icon: Key, color: 'text-blue-500', bg: 'bg-blue-500/10' },
-    { label: 'Active Devices', value: stats?.activeLicenses, icon: Users, color: 'text-emerald-500', bg: 'bg-emerald-500/10' },
-    { label: 'Expired Keys', value: stats?.expiredLicenses, icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-500/10' },
-    { label: 'Total Packages', value: stats?.totalPackages, icon: Package, color: 'text-purple-500', bg: 'bg-purple-500/10' },
+    { label: 'Total Licenses', value: stats.totalLicenses, icon: Key, color: 'text-blue-500', bg: 'bg-blue-500/10' },
+    { label: 'Active Devices', value: stats.activeLicenses, icon: Users, color: 'text-emerald-500', bg: 'bg-emerald-500/10' },
+    { label: 'Expired Keys', value: stats.expiredLicenses, icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-500/10' },
+    { label: 'Total Packages', value: stats.totalPackages, icon: Package, color: 'text-purple-500', bg: 'bg-purple-500/10' },
   ];
 
   return (

@@ -4,65 +4,70 @@ import {
   LayoutDashboard, 
   Package, 
   Key, 
-  Bell, 
   Settings, 
-  Users, 
   LogOut, 
   Menu, 
-  X,
-  TrendingUp,
   ShieldCheck,
-  Clock,
-  Smartphone
+  Users
 } from 'lucide-react';
 import { DashboardStats } from './components/admin/DashboardStats';
-import { PackagesManager } from './components/admin/PackagesManager';
-import { LicenseManager } from './components/admin/LicenseManager';
-import { SettingsManager } from './components/admin/SettingsManager';
+import PackagesManager from './components/admin/PackagesManager';
+import LicenseManager from './components/admin/LicenseManager';
+import SettingsManager from './components/admin/SettingsManager';
+import { auth, onAuthStateChanged, signOut } from './firebase';
 
 export const AdminApp: React.FC = () => {
-  const [token, setToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('admin_token');
-    } catch (e) {
-      return null;
-    }
-  });
+  const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   useEffect(() => {
-    if (token) {
-      localStorage.setItem('admin_token', token);
-    } else {
-      localStorage.removeItem('admin_token');
-    }
-  }, [token]);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser && currentUser.email === 'bdyounus691@gmail.com') {
+        setUser(currentUser);
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
 
-  if (!token) {
-    return <AdminLogin onLogin={setToken} />;
+    return () => unsubscribe();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
   }
 
-  const handleLogout = () => {
-    setToken(null);
+  if (!user) {
+    return <AdminLogin onLogin={() => {}} />;
+  }
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
   };
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'packages', label: 'Packages', icon: Package },
     { id: 'licenses', label: 'License Keys', icon: Key },
-    { id: 'notifications', label: 'Notifications', icon: Bell },
-    { id: 'users', label: 'User Monitoring', icon: Users },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   const renderContent = () => {
+    const token = 'firebase-auth-active'; // Placeholder for components that still expect a token
     switch (activeTab) {
       case 'dashboard': return <DashboardStats token={token} onNavigate={setActiveTab} />;
       case 'packages': return <PackagesManager />;
       case 'licenses': return <LicenseManager token={token} onLogout={handleLogout} />;
-      case 'users': return <LicenseManager token={token} onLogout={handleLogout} />;
-      case 'notifications': return <SettingsManager token={token} onLogout={handleLogout} />;
       case 'settings': return <SettingsManager token={token} onLogout={handleLogout} />;
       default: return <DashboardStats token={token} onNavigate={setActiveTab} />;
     }

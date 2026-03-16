@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import LicenseActivation from './LicenseActivation';
+import { db, handleFirestoreError, OperationType } from '../firebase';
+import { collection, query, where, getDocs, limit, doc, getDoc, onSnapshot } from 'firebase/firestore';
 
 interface LicenseGuardProps {
   children: React.ReactNode;
@@ -8,7 +10,7 @@ interface LicenseGuardProps {
 
 const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
   const [isLicenseValid, setIsLicenseValid] = useState(false); 
-  const [isLicenseSystemEnabled, setIsLicenseSystemEnabled] = useState<boolean | null>(null);
+  const [isLicenseSystemEnabled, setIsLicenseSystemEnabled] = useState<boolean | null>(true); // Default to true (Strict Mode)
   const [checkingLicense, setCheckingLicense] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,104 +28,105 @@ const LicenseGuard: React.FC<LicenseGuardProps> = ({ children }) => {
 
     console.log("LicenseGuard mounted - checking license...");
     
-    const checkLicense = async (isBackgroundCheck = false) => {
+    let unsubSettings: () => void;
+    let unsubLicense: (() => void) | undefined;
+
+    const setupListeners = async () => {
       try {
         setError(null);
-        // 1. Check if system is enabled
-        const statusRes = await fetch(`/api/licenses/status?t=${Date.now()}`);
-        if (!statusRes.ok) {
-          throw new Error(`Status check failed: ${statusRes.status}`);
-        }
         
-        const statusData = await statusRes.json();
-        const systemEnabled = statusData.enabled !== false;
-        setIsLicenseSystemEnabled(systemEnabled);
-        
-        if (!systemEnabled) {
-          setIsLicenseValid(true);
-          localStorage.removeItem('license_expiry');
-          localStorage.removeItem('max_video_duration');
-          if (!isBackgroundCheck) setCheckingLicense(false);
-          return;
-        }
+        // Listen to license system setting
+        const settingsRef = doc(db, 'settings', 'license_system_enabled');
+        unsubSettings = onSnapshot(settingsRef, (docSnap) => {
+          let systemEnabled = true;
+          if (docSnap.exists()) {
+            systemEnabled = docSnap.data().value === 'true';
+          }
+          setIsLicenseSystemEnabled(systemEnabled);
+          
+          if (!systemEnabled) {
+            setIsLicenseValid(true);
+            setCheckingLicense(false);
+          } else {
+            // If system is enabled, check local key
+            const key = localStorage.getItem('license_key');
+            const deviceId = localStorage.getItem('device_id');
+            
+            if (!key || !deviceId) {
+              setIsLicenseValid(false);
+              setCheckingLicense(false);
+              return;
+            }
 
-        // 2. Check local license
-        const key = localStorage.getItem('license_key');
-        const deviceId = localStorage.getItem('device_id');
+            // Listen to the specific license
+            if (!unsubLicense) {
+              const q = query(collection(db, 'licenses'), where('key', '==', key), limit(1));
+              unsubLicense = onSnapshot(q, (querySnapshot) => {
+                if (querySnapshot.empty) {
+                  console.warn("License key not found in Firestore");
+                  setIsLicenseValid(false);
+                  localStorage.removeItem('license_key');
+                  localStorage.removeItem('license_expiry');
+                  localStorage.removeItem('max_video_duration');
+                  localStorage.removeItem('device_id');
+                } else {
+                  const licenseDoc = querySnapshot.docs[0];
+                  const licenseData = licenseDoc.data();
 
-        if (!key || !deviceId) {
-          console.log("No local license found - showing activation screen");
-          setIsLicenseValid(false);
-          if (!isBackgroundCheck) setCheckingLicense(false);
-          return;
-        }
-
-        // 3. Verify with server
-        const verifyRes = await fetch('/api/licenses/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, deviceId, activate: false })
+                  if (licenseData.status === 'active' && licenseData.device_id === deviceId) {
+                    if (licenseData.expires_at) {
+                      const expiryDate = new Date(licenseData.expires_at);
+                      if (expiryDate < new Date()) {
+                        console.warn("License expired");
+                        setIsLicenseValid(false);
+                      } else {
+                        setIsLicenseValid(true);
+                        localStorage.setItem('license_expiry', licenseData.expires_at);
+                        if (licenseData.max_video_duration !== undefined) {
+                          localStorage.setItem('max_video_duration', licenseData.max_video_duration.toString());
+                        }
+                      }
+                    } else {
+                      setIsLicenseValid(true);
+                    }
+                  } else {
+                    console.warn("License status invalid or device ID mismatch");
+                    setIsLicenseValid(false);
+                    if (licenseData.device_id !== deviceId) {
+                      // It was activated on another device, so clear local storage
+                      localStorage.removeItem('license_key');
+                      localStorage.removeItem('license_expiry');
+                      localStorage.removeItem('max_video_duration');
+                      // We don't remove device_id so this device keeps its identity
+                    }
+                  }
+                }
+                setCheckingLicense(false);
+              }, (err) => {
+                console.error("License snapshot error:", err);
+                setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${err.message}`);
+                setCheckingLicense(false);
+              });
+            }
+          }
+        }, (err) => {
+          console.error("Settings snapshot error:", err);
+          setError(`সেটিংস চেক করতে সমস্যা হয়েছে: ${err.message}`);
+          setCheckingLicense(false);
         });
 
-        if (!verifyRes.ok && verifyRes.status !== 404 && verifyRes.status !== 403) {
-           throw new Error(`Verification request failed: ${verifyRes.status}`);
-        }
-
-        const verifyData = await verifyRes.json();
-
-        if (verifyData.success) {
-          console.log("License verified successfully");
-          setIsLicenseValid(true);
-          if (verifyData.expiresAt) {
-            localStorage.setItem('license_expiry', verifyData.expiresAt);
-          }
-          if (verifyData.maxVideoDuration !== undefined) {
-            localStorage.setItem('max_video_duration', verifyData.maxVideoDuration.toString());
-          }
-        } else {
-          console.warn("License check failed:", verifyData.error);
-          setIsLicenseValid(false);
-          
-          if (verifyRes.status === 404) {
-            localStorage.removeItem('license_key');
-            localStorage.removeItem('license_expiry');
-            localStorage.removeItem('max_video_duration');
-            localStorage.removeItem('device_id');
-          }
-        }
       } catch (e: any) {
-        console.error("License check failed", e);
-        if (window.location.hostname.includes('github.io')) {
-          setError("এই অ্যাপটি GitHub Pages-এ চলবে না কারণ এটি একটি Full-Stack অ্যাপ। এটি চালানোর জন্য একটি Node.js সার্ভার প্রয়োজন। দয়া করে AI Studio-র Preview লিংকটি ব্যবহার করুন।");
-        } else {
-          setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${e.message}`);
-        }
-        // On network error during background check, keep current state
-        if (!isBackgroundCheck) {
-             setIsLicenseValid(false); 
-        }
-      } finally {
-        if (!isBackgroundCheck) setCheckingLicense(false);
+        console.error("Setup listeners failed:", e);
+        setError(`লাইসেন্স চেক করতে সমস্যা হয়েছে: ${e.message}`);
+        setCheckingLicense(false);
       }
     };
 
-    // Initial check
-    checkLicense().catch(err => console.error("Initial license check failed:", err));
-
-    // Periodic check (every 10 seconds)
-    const intervalId = setInterval(() => {
-        checkLicense(true).catch(err => console.error("Background license check failed:", err));
-    }, 10000);
-
-    // Check on window focus
-    const handleFocus = () => {
-        checkLicense(true).catch(err => console.error("Focus license check failed:", err));
-    };
-    window.addEventListener('focus', handleFocus);
+    setupListeners();
 
     return () => {
-        clearInterval(intervalId);
-        window.removeEventListener('focus', handleFocus);
+      if (unsubSettings) unsubSettings();
+      if (unsubLicense) unsubLicense();
     };
   }, []);
 

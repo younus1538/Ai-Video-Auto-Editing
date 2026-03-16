@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit2, Check, X, Package } from 'lucide-react';
+import { Plus, Trash2, Edit2, Package as PackageIcon, X } from 'lucide-react';
+import { db, handleFirestoreError, OperationType } from '../../firebase';
+import { collection, doc, setDoc, deleteDoc, onSnapshot, query } from 'firebase/firestore';
 
 interface Package {
-  id: number;
+  id: string;
   name: string;
   duration_days: number;
   price: number;
   currency: string;
-  active: number;
+  active: boolean;
   max_video_duration: number;
 }
 
@@ -18,7 +20,7 @@ export const PackagesManager: React.FC = () => {
   
   // Form state
   const [isAdding, setIsAdding] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: '',
     duration_days: 30,
@@ -28,65 +30,43 @@ export const PackagesManager: React.FC = () => {
     max_video_duration: 0
   });
 
-  const token = localStorage.getItem('admin_token');
-
-  const fetchPackages = async () => {
-    try {
-      const res = await fetch('/api/licenses/admin/packages', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error('Failed to fetch packages');
-      const data = await res.json();
-      setPackages(data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchPackages();
+    const q = query(collection(db, 'packages'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const pkgList: Package[] = [];
+      snapshot.forEach((doc) => {
+        pkgList.push({ id: doc.id, ...doc.data() } as Package);
+      });
+      setPackages(pkgList);
+      setLoading(false);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'packages');
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const url = editingId 
-        ? `/api/licenses/admin/packages/${editingId}`
-        : '/api/licenses/admin/packages';
-      
-      const method = editingId ? 'PUT' : 'POST';
-
-      const res = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(formData)
+      const id = editingId || Math.random().toString(36).substring(2) + Date.now().toString(36);
+      await setDoc(doc(db, 'packages', id), {
+        ...formData,
+        updatedAt: new Date().toISOString()
       });
-
-      if (!res.ok) throw new Error('Operation failed');
-
-      await fetchPackages();
       resetForm();
     } catch (err: any) {
-      setError(err.message);
+      handleFirestoreError(err, OperationType.WRITE, `packages/${editingId || 'new'}`);
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this package?')) return;
     try {
-      const res = await fetch(`/api/licenses/admin/packages/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error('Delete failed');
-      await fetchPackages();
+      await deleteDoc(doc(db, 'packages', id));
     } catch (err: any) {
-      setError(err.message);
+      handleFirestoreError(err, OperationType.DELETE, `packages/${id}`);
     }
   };
 
@@ -97,7 +77,7 @@ export const PackagesManager: React.FC = () => {
       duration_days: pkg.duration_days,
       price: pkg.price,
       currency: pkg.currency,
-      active: pkg.active === 1,
+      active: pkg.active,
       max_video_duration: pkg.max_video_duration || 0
     });
     setIsAdding(true);
@@ -116,12 +96,18 @@ export const PackagesManager: React.FC = () => {
     });
   };
 
+  if (loading) return (
+    <div className="flex items-center justify-center p-12">
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Package className="w-6 h-6 text-indigo-400" />
-          Package Management
+          <PackageIcon className="w-6 h-6 text-indigo-400" />
+          Package Management (Firebase)
         </h2>
         <button
           onClick={() => setIsAdding(!isAdding)}
@@ -277,7 +263,7 @@ export const PackagesManager: React.FC = () => {
               ))}
               {packages.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={5} className="px-6 py-8 text-center text-zinc-500">
+                  <td colSpan={6} className="px-6 py-8 text-center text-zinc-500">
                     No packages found. Create one to get started.
                   </td>
                 </tr>

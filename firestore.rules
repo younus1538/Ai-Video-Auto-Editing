@@ -1,0 +1,91 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: settings
+    // Fields: key (string), value (string)
+    //
+    // Collection: licenses
+    // Fields: key (string), deviceId (string), expiresAt (string), maxVideoDuration (number), status (string)
+    //
+    // Collection: packages
+    // Fields: id (string), name (string), durationDays (number), price (number), currency (string)
+    //
+    // Collection: admins
+    // Fields: email (string), role (string)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "bdyounus691@gmail.com" ||
+        request.auth.uid == "2kvBt6vHuugYWsmxgnD0paw0fyf1" ||
+        (request.auth.uid != null && exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
+      );
+    }
+
+    function isValidSetting(data) {
+      return data.keys().hasAll(['key', 'value']) &&
+             data.key is string && data.key.size() > 0 &&
+             data.value is string &&
+             (!('updatedAt' in data) || data.updatedAt is string);
+    }
+
+    function isValidLicense(data) {
+      return data.keys().hasAll(['key', 'status']) &&
+             data.key is string && data.key.size() > 0 &&
+             data.status in ['active', 'inactive', 'expired', 'suspended', 'revoked'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    // Settings: Publicly readable (for app config), writable by admin
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidSetting(request.resource.data);
+    }
+
+    // Licenses: Admin can do everything. Public needs to read to verify key, and update to activate.
+    match /licenses/{licenseId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        // Allow user to activate an inactive license
+        (resource.data.status == 'inactive' &&
+         request.resource.data.status == 'active' &&
+         request.resource.data.device_id is string)
+        ||
+        // Allow user to transfer an active license to a new device
+        (resource.data.status == 'active' &&
+         request.resource.data.status == 'active' &&
+         request.resource.data.keys().hasAny(['device_id', 'last_transferred_at']) &&
+         (!('device_id' in resource.data) || request.resource.data.device_id != resource.data.device_id))
+      );
+    }
+
+    // Packages: Publicly readable, writable by admin
+    match /packages/{packageId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Admins: Only admins can read/write
+    match /admins/{adminId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

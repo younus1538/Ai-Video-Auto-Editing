@@ -9,8 +9,7 @@ import path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import archiver from 'archiver';
-import adminRoutes from './server/routes/admin.ts';
-import licenseRoutes from './server/routes/licenses.ts';
+import axios from 'axios';
 
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -25,33 +24,18 @@ app.use(cors());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ limit: '500mb', extended: true }));
 
-// Register Admin and License Routes
-console.log('Registering API routes...');
-
-app.get('/api/test', (req, res) => {
-  console.log('Test route hit');
-  res.json({ message: 'API is working' });
-});
-
-app.use('/api/admin', (req, res, next) => {
-  console.log(`Admin route hit: ${req.method} ${req.path}`);
-  next();
-}, adminRoutes);
-
-app.use('/api/licenses', (req, res, next) => {
-  console.log(`License route hit: ${req.method} ${req.path}`);
-  next();
-}, licenseRoutes);
-
-console.log('API routes registered.');
-
 // Global error handler for API routes
 app.use('/api/*', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error('API Error:', err);
+  console.error('Stack:', err.stack);
   if (res.headersSent) {
     return next(err);
   }
-  res.status(500).json({ error: 'Internal Server Error', details: err.message });
+  res.status(500).json({ 
+    error: 'Internal Server Error', 
+    details: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
 });
 
 // Use a local storage directory instead of tmp for better persistence
@@ -90,19 +74,33 @@ const activeProcesses = new Map<string, any>();
 const JOBS_FILE = path.join(STORAGE_DIR, 'jobs.json');
 
 let saveTimeout: NodeJS.Timeout | null = null;
+let isSavingPending = false;
+
 function saveJobs() {
-  if (saveTimeout) return;
-  saveTimeout = setTimeout(() => {
+  if (saveTimeout) {
+    isSavingPending = true;
+    return;
+  }
+  
+  const performSave = () => {
+    isSavingPending = false;
     try {
       const data = JSON.stringify(Array.from(jobs.entries()));
       fs.writeFile(JOBS_FILE, data, (err) => {
         if (err) console.error("Failed to save jobs:", err);
+        if (isSavingPending) {
+          saveTimeout = setTimeout(performSave, 1000);
+        } else {
+          saveTimeout = null;
+        }
       });
     } catch (e) {
       console.error("Failed to serialize jobs:", e);
+      saveTimeout = null;
     }
-    saveTimeout = null;
-  }, 1000);
+  };
+
+  saveTimeout = setTimeout(performSave, 1000);
 }
 
 function parseTimemark(timemark: string): number {
@@ -120,8 +118,12 @@ function parseTimemark(timemark: string): number {
 function loadJobs() {
   try {
     if (fs.existsSync(JOBS_FILE)) {
+      console.log(`Loading jobs from ${JOBS_FILE}...`);
       const rawData = fs.readFileSync(JOBS_FILE, 'utf-8');
-      if (!rawData) return;
+      if (!rawData) {
+        console.log("Jobs file is empty.");
+        return;
+      }
       
       const data = JSON.parse(rawData);
       if (!Array.isArray(data)) {
@@ -129,12 +131,13 @@ function loadJobs() {
         return;
       }
 
+      console.log(`Found ${data.length} jobs in persistence.`);
       data.forEach(([id, job]: [string, RenderJob]) => {
         if (!id || !job) return;
         
         // Check if workDir still exists
         if (!job.workDir || !fs.existsSync(job.workDir)) {
-           // If files are gone, we can't recover.
+           console.log(`Job ${id} workDir missing, skipping.`);
            return;
         }
 
@@ -155,7 +158,9 @@ function loadJobs() {
           jobs.set(id, job);
         }
       });
-      console.log(`Loaded ${jobs.size} jobs from persistence.`);
+      console.log(`Successfully loaded ${jobs.size} jobs.`);
+    } else {
+      console.log("No jobs file found, starting fresh.");
     }
   } catch (e) {
     console.error("Failed to load jobs:", e);
@@ -164,6 +169,7 @@ function loadJobs() {
 
 // Load jobs on startup
 loadJobs();
+// Force rebuild comment: 2026-03-15T17:00:00Z
 
 // 1. Create Job
 app.post('/api/jobs', (req, res) => {
@@ -175,13 +181,48 @@ app.post('/api/jobs', (req, res) => {
   res.json({ jobId });
 });
 
-// 2. Upload File
-app.post('/api/jobs/:jobId/upload', upload.single('file'), (req, res) => {
+// 1.5. List Jobs
+app.get('/api/jobs', (req, res) => {
+  res.json(Array.from(jobs.values()));
+});
+
+// 2. Upload File or URL
+app.post('/api/jobs/:jobId/upload', upload.single('file'), async (req, res) => {
   const { jobId } = req.params;
-  const { fieldname } = req.body;
+  const { fieldname, url } = req.body;
   const job = jobs.get(jobId);
   
   if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  // Handle URL upload (server-side download)
+  if (url && url.startsWith('http')) {
+    try {
+      console.log(`Job ${jobId}: Downloading from URL: ${url}`);
+      const response = await axios.get(url, { responseType: 'arraybuffer' });
+      const buffer = Buffer.from(response.data);
+      
+      // Determine extension
+      let ext = path.extname(new URL(url).pathname) || '';
+      if (!ext) {
+        const contentType = response.headers['content-type'];
+        if (contentType?.includes('image/png')) ext = '.png';
+        else if (contentType?.includes('image/jpeg')) ext = '.jpg';
+        else if (contentType?.includes('video/mp4')) ext = '.mp4';
+        else if (contentType?.includes('audio/mpeg')) ext = '.mp3';
+        else if (contentType?.includes('audio/wav')) ext = '.wav';
+      }
+
+      const destPath = path.join(job.workDir, `${fieldname}${ext}`);
+      fs.writeFileSync(destPath, buffer);
+      job.files[fieldname] = destPath;
+      saveJobs();
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error(`Failed to download from URL ${url}:`, err);
+      return res.status(500).json({ error: `লিঙ্ক থেকে ফাইল ডাউনলোড করতে সমস্যা হয়েছে: ${err.message}` });
+    }
+  }
+  
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const ext = path.extname(req.file.originalname) || '';
@@ -201,11 +242,11 @@ app.post('/api/jobs/:jobId/render', async (req, res) => {
   
   job.metadata = req.body.metadata;
   job.status = 'processing';
-  job.progress = 0;
+  job.progress = 1;
   // Initialize scene counts immediately to avoid race conditions in UI
   if (Array.isArray(req.body.metadata)) {
     job.totalScenes = req.body.metadata.length;
-    job.currentScene = 0;
+    job.currentScene = 1;
   }
   saveJobs();
   res.json({ success: true });
@@ -224,6 +265,7 @@ app.get('/api/jobs/:jobId/status', (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
+
   res.json({ 
     status: job.status, 
     progress: job.progress, 
@@ -394,7 +436,9 @@ async function processJob(job: RenderJob) {
   const intermediateFiles: string[] = [];
   const totalScenes = metadata.length;
   job.totalScenes = totalScenes;
-  job.currentScene = 0;
+  job.currentScene = 1;
+  job.progress = 1;
+  saveJobs();
 
   // Calculate total duration
   let totalDuration = 0;
@@ -423,9 +467,7 @@ async function processJob(job: RenderJob) {
     const outputPath = path.join(workDir, `scene_${i}.mp4`);
     intermediateFiles.push(outputPath);
     const duration = scene.actualEndTime - scene.actualStartTime;
-
-    console.log(`Job ${job.id}: Processing scene ${i}, input: ${inputPath}, output: ${outputPath}`);
-    console.log(`Job ${job.id}: Running ffmpeg command...`);
+    console.log(`Job ${job.id}: Strict Timing Check - Scene ${i}, Expected Duration: ${duration}s`);
 
     // Skip if already exists and has size > 0 (basic check for resumption)
     if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1000) {
@@ -450,21 +492,21 @@ async function processJob(job: RenderJob) {
         // Modeling Logic based on videoPrompt keywords
         const vPrompt = (scene.videoPrompt || "").toUpperCase();
         
-        // 1s Zoom-out at start (fast), then slow zoom-out to mid, then slow zoom-in, then 1s Zoom-in at end (fast)
-        const midFrame = Math.floor(totalFrames / 2);
-        // Ensure fastFrames is at least 1 to avoid division by zero
-        const fastFrames = Math.max(1, Math.min(30, Math.floor(midFrame / 2)));
-        
-        // Ensure denominators are at least 1
-        const den1 = fastFrames;
-        const den2 = Math.max(1, midFrame - fastFrames);
-        const den3 = Math.max(1, totalFrames - fastFrames - midFrame);
-        const den4 = fastFrames;
+        // Half time zoom-out, half time zoom-in
+        // Zoom-out: Starts fast, slows down (ease-out)
+        // Zoom-in: Starts slow, speeds up (ease-in)
+        const midFrame = Math.max(1, Math.floor(totalFrames / 2));
+        const secondHalfFrames = Math.max(1, totalFrames - midFrame);
+        const maxZoom = 1.3;
+        const minZoom = 1.0;
+        const zoomDiff = maxZoom - minZoom;
 
-        let zoomExpr = `if(lte(on, ${fastFrames}), 1.2 - (0.1/${den1})*on, ` +
-                       `if(lte(on, ${midFrame}), 1.1 - (0.1/${den2})*(on-${fastFrames}), ` +
-                       `if(lte(on, ${totalFrames}-${fastFrames}), 1.0 + (0.1/${den3})*(on-${midFrame}), ` +
-                       `1.1 + (0.1/${den4})*(on-(${totalFrames}-${fastFrames})))))`;
+        // Using quadratic curves for easing:
+        // First half (zoom out): minZoom + zoomDiff * (1 - on/midFrame)^3 (Ease-out)
+        // Second half (zoom in): minZoom + zoomDiff * ((on-midFrame)/secondHalfFrames)^3 (Ease-in)
+        let zoomExpr = `if(lte(on, ${midFrame}), ` +
+                       `${minZoom} + ${zoomDiff} * pow(1 - on/${midFrame}, 3), ` +
+                       `${minZoom} + ${zoomDiff} * pow((on-${midFrame})/${secondHalfFrames}, 3))`;
         
         let xExpr = `iw/2-(iw/zoom/2)`;
         let yExpr = `ih/2-(ih/zoom/2)`;
@@ -488,6 +530,9 @@ async function processJob(job: RenderJob) {
           yExpr = `(ih/2-(ih/zoom/2)) + ${randY}`;
         }
 
+        const fadeDuration = Math.min(0.3, duration / 2.5);
+        const blurFilters: string[] = [];
+
         command = command
           // Removed -loop 1 here as zoompan handles single images automatically and loop 1 can cause hangs
           .videoFilters([
@@ -495,12 +540,16 @@ async function processJob(job: RenderJob) {
             'crop=2496:1404',
             `zoompan=z='${zoomExpr}':d=${totalFrames}:x='${xExpr}':y='${yExpr}':s=1920x1080:fps=30`,
             'format=yuv420p',
-            `fade=t=in:st=0:d=0.5`,
-            `fade=t=out:st=${Math.max(0, duration - 0.5)}:d=0.5`
+            `fade=t=in:st=0:d=${fadeDuration}`,
+            `fade=t=out:st=${Math.max(0, duration - fadeDuration)}:d=${fadeDuration}`,
+            ...blurFilters
           ])
           .outputOptions(['-t', duration.toString()]);
       } else {
         console.log(`Job ${job.id}: Scene ${i} (Video) - Duration: ${duration}s`);
+        const fadeDuration = Math.min(0.3, duration / 2.5);
+        const blurFilters: string[] = [];
+
         command = command
           .inputOptions(['-stream_loop', '-1'])
           .videoFilters([
@@ -509,9 +558,11 @@ async function processJob(job: RenderJob) {
             'setsar=1',
             'fps=30',
             'format=yuv420p',
-            `fade=t=in:st=0:d=0.3`,
-            `fade=t=out:st=${Math.max(0, duration - 0.3)}:d=0.3`
-          ]);
+            `fade=t=in:st=0:d=${fadeDuration}`,
+            `fade=t=out:st=${Math.max(0, duration - fadeDuration)}:d=${fadeDuration}`,
+            ...blurFilters
+          ])
+          .outputOptions(['-t', duration.toString()]);
       }
 
       // Simulated progress interval in case ffmpeg doesn't report it
@@ -543,8 +594,8 @@ async function processJob(job: RenderJob) {
           '-c:v libx264',
           '-pix_fmt yuv420p',
           '-r 30',
-          '-crf 18', // High quality (visually lossless) to match original video quality
-          '-preset fast', // Better quality preset
+          '-crf 23', // Adjusted for faster encoding
+          '-preset ultrafast', // Adjusted for faster encoding
           '-an',
           '-max_muxing_queue_size 9999' // Prevent buffer errors
         ])
@@ -625,13 +676,18 @@ async function processJob(job: RenderJob) {
       .input(audioPath)
       .outputOptions([
         '-y',
-        '-c:v copy',
+        '-c:v libx264',
+        '-preset ultrafast',
+        '-crf 23',
         '-c:a aac',
         `-b:a ${audioBitrate}`,
+        '-map 0:v',
+        '-map 1:a',
         '-shortest',
         '-movflags +faststart'
       ])
       .on('progress', (p) => {
+        console.log(`Job ${job.id}: Concat progress: ${p.percent}%`);
         // Concatenation is roughly 80% to 95% of the total job
         if (p.percent) {
           const concatProgress = (p.percent / 100) * 15; // 15% for concat
@@ -753,7 +809,11 @@ async function processJob(job: RenderJob) {
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: false,
+        watch: null
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

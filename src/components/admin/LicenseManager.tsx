@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, CheckCircle, XCircle, Search, RefreshCw, Clock, Video } from 'lucide-react';
+import { Plus, Trash2, CheckCircle, XCircle, Search, Clock, Video } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { db, handleFirestoreError, OperationType } from '../../firebase';
+import { collection, doc, setDoc, deleteDoc, onSnapshot, query, addDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 
 interface License {
-  id: number;
+  id: string;
   key: string;
   days: number;
   price: number;
@@ -11,16 +13,16 @@ interface License {
   device_id?: string;
   activated_at?: string;
   expires_at?: string;
-  created_at: string;
+  created_at: any;
   max_video_duration: number;
 }
 
 interface LicenseManagerProps {
-  token: string;
+  token?: string; // Kept for compatibility but not used for Firestore
   onLogout: () => void;
 }
 
-export const LicenseManager: React.FC<LicenseManagerProps> = ({ token, onLogout }) => {
+const LicenseManager: React.FC<LicenseManagerProps> = ({ onLogout }) => {
   const [licenses, setLicenses] = useState<License[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -29,106 +31,133 @@ export const LicenseManager: React.FC<LicenseManagerProps> = ({ token, onLogout 
   const [generateConfig, setGenerateConfig] = useState({ days: 7, price: 20, count: 1, max_video_duration: 0 });
   const [customPackage, setCustomPackage] = useState(false);
 
-  const fetchLicenses = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/licenses', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.status === 401) {
-        onLogout();
-        throw new Error("Unauthorized");
-      }
-      const data = await res.json();
-      setLicenses(data);
-    } catch (err) {
-      console.error("Failed to fetch licenses", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchLicenses();
+    const q = query(collection(db, 'licenses'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const licenseList: License[] = [];
+      snapshot.forEach((doc) => {
+        licenseList.push({ id: doc.id, ...doc.data() } as License);
+      });
+      // Sort by created_at descending
+      licenseList.sort((a, b) => {
+        const dateA = a.created_at?.seconds || 0;
+        const dateB = b.created_at?.seconds || 0;
+        return dateB - dateA;
+      });
+      setLicenses(licenseList);
+      setLoading(false);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'licenses');
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
+
+  const generateKey = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let key = '';
+    for (let i = 0; i < 16; i++) {
+      if (i > 0 && i % 4 === 0) key += '-';
+      key += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return key;
+  };
 
   const handleGenerate = async () => {
     try {
-      const res = await fetch('/api/licenses/generate', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(generateConfig),
-      });
-      if (res.ok) {
-        fetchLicenses();
-        setShowGenerateModal(false);
+      for (let i = 0; i < generateConfig.count; i++) {
+        const key = generateKey();
+        await addDoc(collection(db, 'licenses'), {
+          key,
+          days: generateConfig.days,
+          price: generateConfig.price,
+          status: 'inactive',
+          max_video_duration: generateConfig.max_video_duration,
+          created_at: serverTimestamp()
+        });
       }
+      setShowGenerateModal(false);
     } catch (err) {
-      console.error("Failed to generate license", err);
+      handleFirestoreError(err, OperationType.CREATE, 'licenses');
     }
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this license?')) return;
+  const [error, setError] = useState<string | null>(null);
+
+  const handleStatusChange = async (id: string, action: 'activate' | 'deactivate') => {
     try {
-      await fetch(`/api/licenses/${id}`, { 
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+      await updateDoc(doc(db, 'licenses', id), {
+        status: action === 'activate' ? 'active' : 'inactive'
       });
-      setLicenses(licenses.filter(l => l.id !== id));
-    } catch (err) {
-      console.error("Failed to delete license", err);
+    } catch (err: any) {
+      setError(err.message || 'Failed to update status');
+      handleFirestoreError(err, OperationType.UPDATE, `licenses/${id}`);
     }
   };
 
-  const handleStatusChange = async (id: number, action: 'activate' | 'deactivate') => {
+  const handleDelete = async (id: string) => {
+    if (!window.confirm('Are you sure you want to delete this license?')) return;
     try {
-      await fetch(`/api/licenses/${id}/${action}`, { 
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      fetchLicenses();
-    } catch (err) {
-      console.error(`Failed to ${action} license`, err);
+      await deleteDoc(doc(db, 'licenses', id));
+    } catch (err: any) {
+      let message = err.message || 'Failed to delete license';
+      try {
+        const parsed = JSON.parse(message);
+        message = parsed.error || message;
+      } catch (e) {}
+      setError(message);
+      handleFirestoreError(err, OperationType.DELETE, `licenses/${id}`);
     }
   };
 
-  const handleUpdateMaxDuration = async (id: number, currentDuration: number) => {
-    const duration = prompt("Enter max video duration in minutes (0 for unlimited):", currentDuration.toString());
+  const handleUpdateMaxDuration = async (id: string, currentDuration: number) => {
+    const duration = window.prompt("Enter max video duration in minutes (0 for unlimited):", currentDuration.toString());
     if (duration === null) return;
     try {
-      await fetch(`/api/licenses/${id}/max_video_duration`, {
-        method: 'PUT',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ max_video_duration: parseInt(duration) || 0 }),
+      await updateDoc(doc(db, 'licenses', id), {
+        max_video_duration: parseInt(duration) || 0
       });
-      fetchLicenses();
-    } catch (err) {
-      console.error("Failed to update max video duration", err);
+    } catch (err: any) {
+      let message = err.message || 'Failed to update duration';
+      try {
+        const parsed = JSON.parse(message);
+        message = parsed.error || message;
+      } catch (e) {}
+      setError(message);
+      handleFirestoreError(err, OperationType.UPDATE, `licenses/${id}`);
     }
   };
 
-  const handleExtend = async (id: number) => {
-    const days = prompt("Enter days to extend:");
-    if (!days) return;
+  const handleExtend = async (id: string) => {
+    const daysStr = window.prompt("Enter days to extend:");
+    if (!daysStr) return;
+    const days = parseInt(daysStr);
+    if (isNaN(days)) return;
+
     try {
-      await fetch(`/api/licenses/${id}/extend`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ days: parseInt(days) }),
-      });
-      fetchLicenses();
-    } catch (err) {
-      console.error("Failed to extend license", err);
+      const license = licenses.find(l => l.id === id);
+      if (!license) return;
+
+      const updates: any = {
+        days: (license.days || 0) + days
+      };
+
+      if (license.expires_at) {
+        const currentExpire = new Date(license.expires_at);
+        currentExpire.setDate(currentExpire.getDate() + days);
+        updates.expires_at = currentExpire.toISOString();
+      }
+
+      await updateDoc(doc(db, 'licenses', id), updates);
+    } catch (err: any) {
+      let message = err.message || 'Failed to extend license';
+      try {
+        const parsed = JSON.parse(message);
+        message = parsed.error || message;
+      } catch (e) {}
+      setError(message);
+      handleFirestoreError(err, OperationType.UPDATE, `licenses/${id}`);
     }
   };
 
@@ -139,8 +168,21 @@ export const LicenseManager: React.FC<LicenseManagerProps> = ({ token, onLogout 
     return matchesSearch && matchesStatus;
   });
 
+  if (loading) return (
+    <div className="flex items-center justify-center p-12">
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl mb-4 flex justify-between items-center">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">X</button>
+        </div>
+      )}
+
       <div className="flex justify-between items-center bg-zinc-900 p-4 rounded-xl border border-zinc-800">
         <div className="flex items-center gap-4">
           <div className="relative">
@@ -170,7 +212,7 @@ export const LicenseManager: React.FC<LicenseManagerProps> = ({ token, onLogout 
           className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-all"
         >
           <Plus className="w-4 h-4" />
-          Generate Key
+          Generate Key (Firebase)
         </button>
       </div>
 
@@ -322,45 +364,47 @@ export const LicenseManager: React.FC<LicenseManagerProps> = ({ token, onLogout 
                   <td className="px-6 py-4 text-xs">
                     {license.expires_at ? new Date(license.expires_at).toLocaleDateString() : '-'}
                   </td>
-                  <td className="px-6 py-4 text-right flex justify-end gap-2">
-                    {license.status === 'active' ? (
+                  <td className="px-6 py-4 text-right">
+                    <div className="flex justify-end gap-1 sm:gap-2">
+                      {license.status === 'active' ? (
+                        <button 
+                          onClick={() => handleStatusChange(license.id, 'deactivate')}
+                          title="Deactivate"
+                          className="p-2 sm:p-2.5 hover:bg-yellow-500/10 text-yellow-500 rounded-lg transition-colors"
+                        >
+                          <XCircle className="w-5 h-5 sm:w-4 sm:h-4" />
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={() => handleStatusChange(license.id, 'activate')}
+                          title="Activate"
+                          className="p-2 sm:p-2.5 hover:bg-green-500/10 text-green-500 rounded-lg transition-colors"
+                        >
+                          <CheckCircle className="w-5 h-5 sm:w-4 sm:h-4" />
+                        </button>
+                      )}
                       <button 
-                        onClick={() => handleStatusChange(license.id, 'deactivate')}
-                        title="Deactivate"
-                        className="p-2 hover:bg-yellow-500/10 text-yellow-400 rounded-lg transition-colors"
+                        onClick={() => handleUpdateMaxDuration(license.id, license.max_video_duration)}
+                        title="Update Max Video Duration"
+                        className="p-2 sm:p-2.5 hover:bg-purple-500/10 text-purple-500 rounded-lg transition-colors"
                       >
-                        <XCircle className="w-4 h-4" />
+                        <Video className="w-5 h-5 sm:w-4 sm:h-4" />
                       </button>
-                    ) : (
                       <button 
-                        onClick={() => handleStatusChange(license.id, 'activate')}
-                        title="Activate"
-                        className="p-2 hover:bg-green-500/10 text-green-400 rounded-lg transition-colors"
+                        onClick={() => handleExtend(license.id)}
+                        title="Extend"
+                        className="p-2 sm:p-2.5 hover:bg-blue-500/10 text-blue-500 rounded-lg transition-colors"
                       >
-                        <CheckCircle className="w-4 h-4" />
+                        <Clock className="w-5 h-5 sm:w-4 sm:h-4" />
                       </button>
-                    )}
-                    <button 
-                      onClick={() => handleUpdateMaxDuration(license.id, license.max_video_duration)}
-                      title="Update Max Video Duration"
-                      className="p-2 hover:bg-purple-500/10 text-purple-400 rounded-lg transition-colors"
-                    >
-                      <Video className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={() => handleExtend(license.id)}
-                      title="Extend"
-                      className="p-2 hover:bg-blue-500/10 text-blue-400 rounded-lg transition-colors"
-                    >
-                      <Clock className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={() => handleDelete(license.id)}
-                      title="Delete"
-                      className="p-2 hover:bg-red-500/10 text-red-400 rounded-lg transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                      <button 
+                        onClick={() => handleDelete(license.id)}
+                        title="Delete"
+                        className="p-2 sm:p-2.5 hover:bg-red-500/10 text-red-500 rounded-lg transition-colors"
+                      >
+                        <Trash2 className="w-5 h-5 sm:w-4 sm:h-4" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

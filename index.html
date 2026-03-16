@@ -18,6 +18,9 @@
         console.log('Window load event');
       });
       window.onerror = function(msg, url, line, col, error) {
+        if (msg && msg.toString().includes('WebSocket')) {
+          return false;
+        }
         var overlay = document.getElementById('error-overlay');
         var message = document.getElementById('error-message');
         overlay.style.display = 'block';
@@ -25,6 +28,9 @@
         return false;
       };
       window.onunhandledrejection = function(event) {
+        if (event.reason && event.reason.toString().includes('WebSocket closed without opened')) {
+          return;
+        }
         var overlay = document.getElementById('error-overlay');
         var message = document.getElementById('error-message');
         overlay.style.display = 'block';
